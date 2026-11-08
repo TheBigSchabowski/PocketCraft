@@ -355,7 +355,7 @@ class PocketCraftTest {
     fun userScriptOnRealVideoCropsMovesCutsAndSaves() {
         val dir = Files.createTempDirectory("pc_user").toFile()
         val engine = ProjectEngine().apply { projectStore = ProjectStore(dir) }
-        engine.setVideoSource("content://com.android.providers.media.documents/document/video%3A1000089402", 53_455L, "VID-20261010-WA0068(2).mp4")
+        engine.setVideoSource("content://test/sample_video.mp4", 53_455L, "Sample Clip")
 
         val result = engine.executeCommand("all u20%\nall move 10%l\nset cut 00:42\ndelete after cut1\nsave")
         val p = engine.project
