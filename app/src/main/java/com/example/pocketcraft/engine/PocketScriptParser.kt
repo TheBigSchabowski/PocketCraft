@@ -14,6 +14,7 @@ import com.example.pocketcraft.model.BlurConfig
 import com.example.pocketcraft.model.BlurMode
 import com.example.pocketcraft.model.BuiltInFont
 import com.example.pocketcraft.model.CanvasOverlay
+import com.example.pocketcraft.model.CutMarker
 import com.example.pocketcraft.model.OverlayKind
 import com.example.pocketcraft.model.SubtitleSegment
 import com.example.pocketcraft.model.TimedFormatSpan
@@ -94,16 +95,29 @@ object PocketScriptParser {
         option = RegexOption.IGNORE_CASE,
     )
 
-    // Regex für `<Zeitbereich> set <ziel>: <inhalt>`
-    // Beispiel: `8-10 set caption: Pinker Honig.red` oder `all set filter: cyberpunk`
-    private val setStatementRegex = Regex(
-        pattern = """^(all|\d+(?:[.,]\d+)?(?:\s*-\s*\d+(?:[.,]\d+)?)?)?\s*(?:set\s+)?(caption|sub|untertitel|text|title|titel|emoji|sticker|zoom|blur|filter|fx|speed|crop|cut|trim)\s*:\s*(.+)$""",
+    // Regex für `set cut 00:48`, `set cut1 00:48`, `cut at 00:48`, `cut 00:48`, `set cut: 00:48`
+    private val cutMarkerRegex = Regex(
+        pattern = """^(?:all\s+)?(?:set\s+)?cut(\d+)?(?:\s+at|\s*:)?\s+(\d+(?::\d+)+|\d+(?:[.,]\d+)?(?:s|sek)?)$""",
         option = RegexOption.IGNORE_CASE,
     )
 
-    // Token-Regexes für Format-Klammern `(8:15)` und Richtungs-Zuschnitte `u20%`, `o20%`, `r20%`, `l20%`
+    // Regex für `delete after cut1`, `delete behind cut`, `delete before cut1`, `delete after 00:48`
+    private val deleteCutRegex = Regex(
+        pattern = """^(?:delete|del|remove|lösche|loesche|cut)\s+(after|behind|nach|hinter|before|in\s+front\s+of|vor|front|between|zwischen)\s+(.+)$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    // Regex für `<Zeitbereich> set <ziel>: <inhalt>`
+    // Beispiel: `8-10 set caption: Pinker Honig.red` oder `all set filter: cyberpunk`
+    private val setStatementRegex = Regex(
+        pattern = """^(all|\d+(?::\d+)+|\d+(?:[.,]\d+)?(?:\s*-\s*(?:\d+(?::\d+)+|\d+(?:[.,]\d+)?))?)?\s*(?:set\s+)?(caption|sub|untertitel|text|title|titel|emoji|sticker|zoom|blur|filter|fx|speed|crop|cut|trim)\s*:\s*(.+)$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    // Token-Regexes für Format-Klammern `(8:15)`, Richtungs-Zuschnitte `u20%`, `o20%`, `r20%`, `l20%`
+    // sowie prozentuale Verschiebungen `move 10%l` (10% lower/runter) und `move 10%u` (10% up/hoch).
     private val timeTokenRegex = Regex(
-        pattern = """^(all|alles|\*|\d+(?:[.,]\d+)?(?:-\d+(?:[.,]\d+)?)?)$""",
+        pattern = """^(all|alles|\*|(?:\d+(?::\d+)+|\d+(?:[.,]\d+)?)(?:-(?:\d+(?::\d+)+|\d+(?:[.,]\d+)?))?)$""",
         option = RegexOption.IGNORE_CASE,
     )
     private val ratioTokenRegex = Regex(
@@ -112,6 +126,14 @@ object PocketScriptParser {
     )
     private val edgeCropTokenRegex = Regex(
         pattern = """^(u|unten|o|oben|r|rechts|l|links)(\d+(?:[.,]\d+)?)%?$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+    private val moveSuffixTokenRegex = Regex(
+        pattern = """^(\d+(?:[.,]\d+)?)%?(lower|low|down|unten|d|l|up|upper|oben|u|o|right|rechts|r|left|links)$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+    private val movePrefixTokenRegex = Regex(
+        pattern = """^(lower|low|down|unten|d|up|upper|oben|right|rechts|left|links|u|o|r|l)(\d+(?:[.,]\d+)?)%?$""",
         option = RegexOption.IGNORE_CASE,
     )
 
@@ -123,13 +145,17 @@ object PocketScriptParser {
         var cutTopPct: Float? = null,    // o20% -> obere 20% wegschneiden
         var cutRightPct: Float? = null,  // r20% -> rechte 20% wegschneiden
         var cutLeftPct: Float? = null,   // l20% -> linke 20% wegschneiden
+        var moveXPct: Float? = null,     // +10% = rechts, -10% = links
+        var moveYPct: Float? = null,     // +10% = 10%l (lower/runter), -10% = 10%u (up/hoch)
     ) {
         val hasModifiers: Boolean
             get() = ratioW != null ||
                 cutBottomPct != null ||
                 cutTopPct != null ||
                 cutRightPct != null ||
-                cutLeftPct != null
+                cutLeftPct != null ||
+                moveXPct != null ||
+                moveYPct != null
     }
 
     /**
@@ -137,15 +163,29 @@ object PocketScriptParser {
      * und gibt `null` zurück, falls es stattdessen ein klassischer Einzelbefehl (`undo`, `zoom 1.5` etc.) ist.
      */
     fun tryExecuteScript(rawInput: String, engine: ProjectEngine): String? {
-        val input = rawInput.trim()
+        var input = rawInput.trim()
         if (input.isEmpty()) return null
+
+        // Unterstützt auch nummerierte Aufzählungen in einer oder mehreren Zeilen wie:
+        // `1. all u20% 2. all move 10%l 3. set cut 00:48 4. delete after cut1`
+        if (Regex("""^\d+\.\s+[a-zA-Z(]""").containsMatchIn(input)) {
+            val numberedSteps = input
+                .split(Regex("""(?:^|\s+)\d+\.\s+(?=[a-zA-Z(])"""))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            if (numberedSteps.size > 1) {
+                input = numberedSteps.joinToString("\n")
+            } else if (numberedSteps.size == 1) {
+                input = numberedSteps.first()
+            }
+        }
 
         // Mehrzeilige Programme (durch Zeilenumbruch `\n` oder `;` getrennt) Zeile für Zeile ausführen.
         // Falls eine `if`/`while`-Zeile vor einer `set caption:`-Zeile steht, werden erst die
         // Setup-Zeilen und direkt danach die `if`/`while`-Regeln ausgewertet.
         if (input.contains("\n") || input.contains(";")) {
             val lines = input.split(Regex("[\r\n;]+"))
-                .map { it.trim() }
+                .map { it.trim().replace(Regex("""^\d+\.\s+"""), "") }
                 .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
             if (lines.isEmpty()) return "Keine ausführbaren Zeilen."
             if (lines.size > 1) {
@@ -168,6 +208,22 @@ object PocketScriptParser {
             return executeIfOrWhileStatement(keyword, conditionRaw, actionBody, engine)
         }
 
+        // 0b. Prüfen auf `set cut 00:48` / `set cut1 00:48` / `cut at 00:48`
+        val cutMatch = cutMarkerRegex.matchEntire(input)
+        if (cutMatch != null) {
+            val cutNum = cutMatch.groupValues[1]
+            val timeToken = cutMatch.groupValues[2]
+            return executeCutMarkerStatement(cutNum, timeToken, engine)
+        }
+
+        // 0c. Prüfen auf `delete after cut1` / `delete behind cut` / `delete before cut1`
+        val delMatch = deleteCutRegex.matchEntire(input)
+        if (delMatch != null) {
+            val dir = delMatch.groupValues[1].lowercase()
+            val target = delMatch.groupValues[2].trim()
+            return executeDeleteCutStatement(dir, target, engine)
+        }
+
         // 1. Prüfen auf `<Zeitbereich> set <Ziel>: <Wert.modifier>`
         val setMatch = setStatementRegex.matchEntire(input)
         if (setMatch != null) {
@@ -177,8 +233,9 @@ object PocketScriptParser {
             return executeSetStatement(rangeToken, targetKind, rawPayload, engine)
         }
 
-        // 2. Prüfen auf Format-/Auflösungs-Ausdrücke (`10-24,3 (8:15) 9 (16:18)`, `all (9:16)`)
-        //    UND/ODER prozentuale Kanten-Zuschnitte (`all u20%`, `o20%`, `r20%`, `l20%`, `90 u90%`)
+        // 2. Prüfen auf Format-/Auflösungs-Ausdrücke (`10-24,3 (8:15) 9 (16:18)`, `all (9:16)`),
+        //    prozentuale Kanten-Zuschnitte (`all u20%`, `o20%`, `r20%`, `l20%`, `90 u90%`)
+        //    UND prozentuale Bildverschiebungen (`all move 10%l`, `all move 10%u`, `u20% move 10%l`)
         val formatOrCropResult = tryParseAndExecuteFormatAndCrop(input, engine)
         if (formatOrCropResult != null) {
             return formatOrCropResult
@@ -400,15 +457,157 @@ object PocketScriptParser {
         }
     }
 
+    /**
+     * Setzt einen benannten Schnittmarker auf der Timeline (`set cut 00:48`, `set cut1 00:48`, `cut at 00:48`).
+     * Falls die Zeitangabe (z.B. `00:48` = 48.000 ms) jenseits der aktuellen Demo-Videolänge (15s) liegt,
+     * wird die Projekt-Timeline automatisch erweitert (z.B. auf 60s), damit hinter `cut1` auch Material
+     * existiert, das mit `delete after cut1` weggeschnitten werden kann.
+     */
+    private fun executeCutMarkerStatement(
+        cutNumRaw: String,
+        timeToken: String,
+        engine: ProjectEngine,
+    ): String {
+        val cutTimeMs = parseSecondsToMs(timeToken).coerceAtLeast(100L)
+        val explicitNum = cutNumRaw.trim().toIntOrNull()
+        val cutId = if (explicitNum != null && explicitNum > 0) {
+            "cut$explicitNum"
+        } else {
+            // Wenn `set cut 00:48` ohne Nummer aufgerufen wird:
+            // Falls noch kein Marker existiert, wird es `cut1`; falls `cut1` schon existiert,
+            // aktualisieren wir `cut1` (damit `set cut ...` + `delete after cut1` immer zusammenpassen).
+            "cut1"
+        }
+
+        val timeFormatted = ProjectEngine.formatTimecode(cutTimeMs)
+        engine.commitChange("Cut-Marker $cutId bei $timeFormatted gesetzt") { p ->
+            // Falls die Schnittmarke jenseits oder genau am Ende der bisherigen Videolänge liegt,
+            // erweitern wir die Quelldauer um mindestens 12s hinter den Cut, damit `delete after cut1`
+            // den hinteren Teil sichtbar wegschneiden kann.
+            val expandedDuration = if (cutTimeMs + 2_000L > p.sourceDurationMs) {
+                cutTimeMs + 12_000L
+            } else {
+                p.sourceDurationMs
+            }
+            val expandedTrimEnd = if (p.trimEndMs >= p.sourceDurationMs - 200L && expandedDuration > p.sourceDurationMs) {
+                expandedDuration
+            } else {
+                maxOf(p.trimEndMs, cutTimeMs + 1_000L).coerceAtMost(expandedDuration)
+            }
+
+            val marker = CutMarker(id = cutId, timeMs = cutTimeMs)
+            val updatedMarkers = (p.cutMarkers.filterNot { it.id.equals(cutId, ignoreCase = true) } + marker)
+                .sortedBy { it.timeMs }
+
+            p.copy(
+                sourceDurationMs = expandedDuration,
+                trimEndMs = expandedTrimEnd,
+                cutMarkers = updatedMarkers,
+            )
+        }
+        engine.playheadMs = cutTimeMs
+        return "Schnittmarke $cutId bei $timeFormatted (${ProjectEngine.formatSec(cutTimeMs)}) gesetzt."
+    }
+
+    /**
+     * Löscht den Videobereich hinter oder vor einer Schnittmarke:
+     * - `delete after cut1` / `delete behind cut1` / `delete behind cut` / `delete after 00:48`
+     *   → Schneidet alles hinter `cut1` weg (`trimEndMs = cut1.timeMs`).
+     * - `delete before cut1` / `delete vor cut1` / `delete before 00:48`
+     *   → Schneidet alles vor `cut1` weg (`trimStartMs = cut1.timeMs`).
+     */
+    private fun executeDeleteCutStatement(
+        dirRaw: String,
+        targetRaw: String,
+        engine: ProjectEngine,
+    ): String {
+        val dir = dirRaw.lowercase().trim()
+        val cleanTarget = targetRaw.trim().lowercase().replace(Regex("\\s+"), "")
+
+        // Ziel-Zeitpunkt bestimmen: entweder über `cut1` / `cut2` / `cut` oder direkt als Zeit `00:48`
+        val resolvedMarker: CutMarker? = when {
+            cleanTarget.startsWith("cut") -> {
+                val numPart = cleanTarget.removePrefix("cut")
+                if (numPart.isEmpty()) {
+                    engine.project.cutMarkers.lastOrNull()
+                } else {
+                    engine.project.cutMarkers.firstOrNull { it.id.equals("cut$numPart", ignoreCase = true) }
+                        ?: engine.project.cutMarkers.lastOrNull()
+                }
+            }
+            else -> null
+        }
+
+        val cutTimeMs = resolvedMarker?.timeMs ?: parseSecondsToMs(targetRaw)
+        if (cutTimeMs <= 0L && resolvedMarker == null) {
+            return "Kein passender Cut-Marker ('$targetRaw') gefunden. Setze zuerst z.B. 'set cut 00:48'."
+        }
+
+        val markerLabel = resolvedMarker?.id ?: ProjectEngine.formatTimecode(cutTimeMs)
+        val timeLabel = ProjectEngine.formatTimecode(cutTimeMs)
+
+        return if (dir in listOf("after", "behind", "nach", "hinter")) {
+            engine.commitChange("Alles nach $markerLabel ($timeLabel) gelöscht") { p ->
+                val newSourceDur = maxOf(p.sourceDurationMs, cutTimeMs)
+                val newEnd = cutTimeMs.coerceIn((p.trimStartMs + 500L).coerceAtMost(newSourceDur), newSourceDur)
+                val trimmedSubs = p.subtitles.mapNotNull { sub ->
+                    when {
+                        sub.startMs >= newEnd -> null
+                        sub.endMs > newEnd -> sub.copy(endMs = newEnd)
+                        else -> sub
+                    }
+                }
+                val trimmedOverlays = p.overlays.mapNotNull { ov ->
+                    when {
+                        ov.startMs >= newEnd -> null
+                        ov.endMs > newEnd -> ov.copy(endMs = newEnd)
+                        else -> ov
+                    }
+                }
+                p.copy(
+                    sourceDurationMs = newSourceDur,
+                    trimEndMs = newEnd,
+                    subtitles = trimmedSubs,
+                    overlays = trimmedOverlays,
+                )
+            }
+            engine.playheadMs = cutTimeMs.coerceAtMost(engine.project.trimEndMs)
+            "Alles hinter $markerLabel ($timeLabel / ${ProjectEngine.formatSec(cutTimeMs)}) gelöscht – Video endet jetzt bei $timeLabel."
+        } else {
+            engine.commitChange("Alles vor $markerLabel ($timeLabel) gelöscht") { p ->
+                val newSourceDur = maxOf(p.sourceDurationMs, cutTimeMs + 1_000L)
+                val newStart = cutTimeMs.coerceIn(0L, (p.trimEndMs - 500L).coerceAtLeast(0L))
+                val trimmedSubs = p.subtitles.mapNotNull { sub ->
+                    when {
+                        sub.endMs <= newStart -> null
+                        sub.startMs < newStart -> sub.copy(startMs = newStart)
+                        else -> sub
+                    }
+                }
+                p.copy(
+                    sourceDurationMs = newSourceDur,
+                    trimStartMs = newStart,
+                    subtitles = trimmedSubs,
+                )
+            }
+            engine.playheadMs = engine.project.trimStartMs
+            "Alles vor $markerLabel ($timeLabel / ${ProjectEngine.formatSec(cutTimeMs)}) gelöscht – Video startet jetzt bei $timeLabel."
+        }
+    }
+
     private fun buildCombinedScopedCommand(
         ranges: List<Pair<Long, Long>>,
         actionBody: String,
     ): String? {
         val bodyTrimmed = actionBody.trim()
-        // Prüfen, ob actionBody ein Format `(9:16)` oder Kanten-Cut `u20%` ist
-        if (ratioTokenRegex.matches(bodyTrimmed) ||
-            edgeCropTokenRegex.matches(bodyTrimmed) ||
-            bodyTrimmed.split(Regex("\\s+")).all { ratioTokenRegex.matches(it) || edgeCropTokenRegex.matches(it) }
+        val tokens = bodyTrimmed.split(Regex("\\s+"))
+        // Prüfen, ob actionBody ein Format `(9:16)`, Kanten-Cut `u20%` oder Move `move 10%l` ist
+        if (tokens.all {
+                ratioTokenRegex.matches(it) ||
+                    edgeCropTokenRegex.matches(it) ||
+                    moveSuffixTokenRegex.matches(it) ||
+                    it.lowercase() in listOf("move", "shift", "pan", "verschiebe")
+            }
         ) {
             return ranges.joinToString(" ") { (startMs, endMs) ->
                 val startSec = startMs / 1000.0
@@ -441,8 +640,10 @@ object PocketScriptParser {
     }
 
     /**
-     * Parst und führt Ausdrücke mit Seitenverhältnissen `(8:15)` und/oder Kanten-Zuschnitten
-     * (`u20%` unten, `o20%` oben, `r20%` rechts, `l20%` links, `90 u90%`) aus.
+     * Parst und führt Ausdrücke mit Seitenverhältnissen `(8:15)`, Kanten-Zuschnitten
+     * (`u20%` unten, `o20%` oben, `r20%` rechts, `l20%` links, `90 u90%`) sowie
+     * prozentualen Verschiebungen (`all move 10%l` = 10% lower/runter, `all move 10%u` = 10% up/hoch,
+     * `u20% move 10%l`) aus.
      */
     private fun tryParseAndExecuteFormatAndCrop(raw: String, engine: ProjectEngine): String? {
         var normalized = raw.trim()
@@ -461,12 +662,17 @@ object PocketScriptParser {
         )
         // Leerzeichen um Bindestrich bei Zeitbereichen `10 - 24,3` -> `10-24,3` normalisieren
         normalized = normalized.replace(
-            Regex("""(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)"""),
+            Regex("""(\d+(?::\d+)+|\d+(?:[.,]\d+)?)\s*-\s*(\d+(?::\d+)+|\d+(?:[.,]\d+)?)"""),
             "$1-$2",
+        )
+        // Leerzeichen zwischen Prozentzahl und Richtungs-Suffix `10% lower` / `10% l` / `10% up` -> `10%lower` / `10%l`
+        normalized = normalized.replace(
+            Regex("""(\d+(?:[.,]\d+)?)\s*%\s*(lower|low|down|unten|up|upper|oben|right|rechts|left|links|l|u|d|o|r)\b""", RegexOption.IGNORE_CASE),
+            "$1%$2",
         )
         // Leerzeichen zwischen Richtung und Prozentzahl `u 20%` -> `u20%` normalisieren
         normalized = normalized.replace(
-            Regex("""\b(u|unten|o|oben|r|rechts|l|links)\s+(\d+(?:[.,]\d+)?%?)""", RegexOption.IGNORE_CASE),
+            Regex("""\b(lower|low|down|unten|up|upper|oben|right|rechts|left|links|u|o|r|l)\s+(\d+(?:[.,]\d+)?%?)""", RegexOption.IGNORE_CASE),
             "$1$2",
         )
 
@@ -475,11 +681,20 @@ object PocketScriptParser {
 
         val segments = mutableListOf<FormatAndCropSegment>()
         var current = FormatAndCropSegment(timeToken = "all")
+        var nextTokenIsMove = false
 
         for (token in tokens) {
+            val lowerTok = token.lowercase()
+            if (lowerTok in listOf("move", "shift", "pan", "verschiebe")) {
+                nextTokenIsMove = true
+                continue
+            }
+
             val timeMatch = timeTokenRegex.matchEntire(token)
             val ratioMatch = ratioTokenRegex.matchEntire(token)
-            val edgeMatch = edgeCropTokenRegex.matchEntire(token)
+            val moveSuffixMatch = moveSuffixTokenRegex.matchEntire(token)
+            val movePrefixMatch = if (nextTokenIsMove) movePrefixTokenRegex.matchEntire(token) else null
+            val edgeMatch = if (!nextTokenIsMove) edgeCropTokenRegex.matchEntire(token) else null
 
             when {
                 timeMatch != null -> {
@@ -493,6 +708,29 @@ object PocketScriptParser {
                 ratioMatch != null -> {
                     current.ratioW = ratioMatch.groupValues[1].replace(",", ".").toFloatOrNull() ?: 9f
                     current.ratioH = ratioMatch.groupValues[2].replace(",", ".").toFloatOrNull() ?: 16f
+                    nextTokenIsMove = false
+                }
+                moveSuffixMatch != null -> {
+                    val pct = (moveSuffixMatch.groupValues[1].replace(",", ".").toFloatOrNull() ?: 0f).coerceIn(0f, 95f)
+                    val dir = moveSuffixMatch.groupValues[2].lowercase()
+                    when (dir) {
+                        "l", "low", "lower", "d", "down", "unten" -> current.moveYPct = pct
+                        "u", "up", "upper", "o", "oben" -> current.moveYPct = -pct
+                        "r", "right", "rechts" -> current.moveXPct = pct
+                        "left", "links" -> current.moveXPct = -pct
+                    }
+                    nextTokenIsMove = false
+                }
+                movePrefixMatch != null -> {
+                    val dir = movePrefixMatch.groupValues[1].lowercase()
+                    val pct = (movePrefixMatch.groupValues[2].replace(",", ".").toFloatOrNull() ?: 0f).coerceIn(0f, 95f)
+                    when (dir) {
+                        "u", "unten", "d", "down", "low", "lower" -> current.moveYPct = pct
+                        "o", "oben", "up", "upper" -> current.moveYPct = -pct
+                        "r", "rechts", "right" -> current.moveXPct = pct
+                        "l", "links", "left" -> current.moveXPct = -pct
+                    }
+                    nextTokenIsMove = false
                 }
                 edgeMatch != null -> {
                     val dirChar = edgeMatch.groupValues[1].lowercase().first()
@@ -505,7 +743,7 @@ object PocketScriptParser {
                     }
                 }
                 else -> {
-                    // Unbekanntes Token -> kein reiner Format-/Kanten-Cut-Ausdruck
+                    // Unbekanntes Token -> kein reiner Format-/Kanten-Cut-/Move-Ausdruck
                     return null
                 }
             }
@@ -522,11 +760,13 @@ object PocketScriptParser {
         val summaryParts = mutableListOf<String>()
 
         // Startwerte aus dem aktuellen globalen Transform übernehmen, damit mehrere Befehle
-        // (z.B. Zeile 1: `all u20%`, Zeile 2: `all r20%`) miteinander kombiniert werden können.
+        // (z.B. Zeile 1: `all u20%`, Zeile 2: `all move 10%l`) miteinander kombiniert werden können.
         var updatedGlobalLeft = engine.project.transform.cropLeft
         var updatedGlobalTop = engine.project.transform.cropTop
         var updatedGlobalRight = engine.project.transform.cropRight
         var updatedGlobalBottom = engine.project.transform.cropBottom
+        var updatedGlobalPanX = engine.project.transform.panX
+        var updatedGlobalPanY = engine.project.transform.panY
         var shouldUpdateGlobalCrop = false
         var clearTimedCropOverrides = false
 
@@ -540,11 +780,14 @@ object PocketScriptParser {
             val cropTopVal = seg.cutTopPct?.let { (it / 100f).coerceIn(0f, 0.98f) }
             val cropRightVal = seg.cutRightPct?.let { (1f - it / 100f).coerceIn(0.02f, 1.0f) }
             val cropBottomVal = seg.cutBottomPct?.let { (1f - it / 100f).coerceIn(0.02f, 1.0f) }
+            val panXVal = seg.moveXPct?.let { (it / 100f).coerceIn(-0.95f, 0.95f) }
+            val panYVal = seg.moveYPct?.let { (it / 100f).coerceIn(-0.95f, 0.95f) }
 
             val hasRatio = seg.ratioW != null && seg.ratioH != null
             val hasEdgeCrop = cropLeftVal != null || cropTopVal != null || cropRightVal != null || cropBottomVal != null
+            val hasMove = panXVal != null || panYVal != null
 
-            if (hasRatio || (!range.isAll && hasEdgeCrop)) {
+            if (hasRatio || (!range.isAll && (hasEdgeCrop || hasMove))) {
                 newSpans.add(
                     TimedFormatSpan(
                         id = "fmt_${System.currentTimeMillis()}_$idx",
@@ -557,6 +800,8 @@ object PocketScriptParser {
                         cropTop = cropTopVal,
                         cropRight = cropRightVal,
                         cropBottom = cropBottomVal,
+                        panX = panXVal,
+                        panY = panYVal,
                     ),
                 )
             }
@@ -565,9 +810,9 @@ object PocketScriptParser {
                 globalPreset = matchClosestAspectPreset(seg.ratioW ?: 9f, seg.ratioH ?: 16f)
             }
 
-            // Wenn `all` (z.B. `all u20%` oder `u20%`) ODER ein einzelnes Segment (`90 u90%`) angegeben wurde,
-            // aktualisieren wir auch den Basis-Transform, damit der Zuschnitt sofort global sitzt.
-            if (hasEdgeCrop && (range.isAll || segments.size == 1)) {
+            // Wenn `all` (z.B. `all u20%`, `all move 10%l`) ODER ein einzelnes Segment (`90 u90%`) angegeben wurde,
+            // aktualisieren wir auch den Basis-Transform, damit Zuschnitt und Verschiebung sofort global sitzen.
+            if ((hasEdgeCrop || hasMove) && (range.isAll || segments.size == 1)) {
                 shouldUpdateGlobalCrop = true
                 if (range.isAll) {
                     clearTimedCropOverrides = true
@@ -596,6 +841,12 @@ object PocketScriptParser {
                         updatedGlobalTop = 0.0f
                     }
                 }
+                if (panXVal != null) {
+                    updatedGlobalPanX = panXVal
+                }
+                if (panYVal != null) {
+                    updatedGlobalPanY = panYVal
+                }
             }
 
             val descTokens = mutableListOf<String>()
@@ -606,6 +857,20 @@ object PocketScriptParser {
             seg.cutTopPct?.let { descTokens.add("oben -${it.roundToInt()}% (o${it.roundToInt()}%)") }
             seg.cutRightPct?.let { descTokens.add("rechts -${it.roundToInt()}% (r${it.roundToInt()}%)") }
             seg.cutLeftPct?.let { descTokens.add("links -${it.roundToInt()}% (l${it.roundToInt()}%)") }
+            seg.moveYPct?.let {
+                if (it >= 0f) {
+                    descTokens.add("move ${it.roundToInt()}%l (runter)")
+                } else {
+                    descTokens.add("move ${(-it).roundToInt()}%u (hoch)")
+                }
+            }
+            seg.moveXPct?.let {
+                if (it >= 0f) {
+                    descTokens.add("move ${it.roundToInt()}%r (rechts)")
+                } else {
+                    descTokens.add("move ${(-it).roundToInt()}%left (links)")
+                }
+            }
 
             val timeLabel = if (range.isAll) "all" else "${ProjectEngine.formatSec(range.startMs)}-${ProjectEngine.formatSec(range.endMs)}"
             summaryParts.add("$timeLabel ${descTokens.joinToString(" ")}")
@@ -621,12 +886,16 @@ object PocketScriptParser {
                         cropTop = if (segments.any { it.cutTopPct != null }) null else old.cropTop,
                         cropRight = if (segments.any { it.cutRightPct != null }) null else old.cropRight,
                         cropBottom = if (segments.any { it.cutBottomPct != null }) null else old.cropBottom,
+                        panX = if (segments.any { it.moveXPct != null }) null else old.panX,
+                        panY = if (segments.any { it.moveYPct != null }) null else old.panY,
                     )
                     if (!stripped.hasCustomRatio &&
                         stripped.cropLeft == null &&
                         stripped.cropTop == null &&
                         stripped.cropRight == null &&
-                        stripped.cropBottom == null
+                        stripped.cropBottom == null &&
+                        stripped.panX == null &&
+                        stripped.panY == null
                     ) {
                         null
                     } else {
@@ -644,6 +913,8 @@ object PocketScriptParser {
                     cropTop = updatedGlobalTop.coerceIn(0f, 0.98f),
                     cropRight = updatedGlobalRight.coerceIn((updatedGlobalLeft + 0.02f).coerceAtMost(1f), 1f),
                     cropBottom = updatedGlobalBottom.coerceIn((updatedGlobalTop + 0.02f).coerceAtMost(1f), 1f),
+                    panX = updatedGlobalPanX.coerceIn(-0.95f, 0.95f),
+                    panY = updatedGlobalPanY.coerceIn(-0.95f, 0.95f),
                 )
             } else {
                 p.transform
@@ -939,7 +1210,25 @@ object PocketScriptParser {
     }
 
     fun parseSecondsToMs(secStr: String): Long {
-        val normalized = secStr.trim().replace(",", ".").removeSuffix("s")
+        val normalized = secStr.trim().replace(",", ".").removeSuffix("s").removeSuffix("sek")
+        if (normalized.contains(":")) {
+            val parts = normalized.split(":")
+            val totalSeconds = when (parts.size) {
+                2 -> {
+                    val mins = parts[0].toDoubleOrNull() ?: 0.0
+                    val secs = parts[1].toDoubleOrNull() ?: 0.0
+                    mins * 60.0 + secs
+                }
+                3 -> {
+                    val hours = parts[0].toDoubleOrNull() ?: 0.0
+                    val mins = parts[1].toDoubleOrNull() ?: 0.0
+                    val secs = parts[2].toDoubleOrNull() ?: 0.0
+                    hours * 3600.0 + mins * 60.0 + secs
+                }
+                else -> 0.0
+            }
+            return (totalSeconds * 1000.0).toLong().coerceAtLeast(0L)
+        }
         val seconds = normalized.toDoubleOrNull() ?: 0.0
         return (seconds * 1000.0).toLong().coerceAtLeast(0L)
     }
@@ -987,18 +1276,27 @@ object PocketScriptPdfManualGenerator {
 
     val sections: List<ManualSection> = listOf(
         ManualSection(
-            title = "1. Bildränder prozentgenau wegschneiden (u%, o%, r%, l%)",
+            title = "1. Bildränder wegschneiden (u%, o%, r%, l%) & Verschieben (move)",
             codeExamples = listOf(
                 "all u20%" to "Unten (u) 20 % wegschneiden – nimmt die unteren 20 % des Bildes raus.",
-                "all o20%" to "Oben (o) 20 % wegschneiden (geht mit jeder Prozentzahl wie o40%).",
-                "all r20%" to "Rechts (r) 20 % wegschneiden.",
-                "all l20%" to "Links (l) 20 % wegschneiden.",
+                "all move 10%l" to "Verschiebt das (geschnittene) Bild um 10 % nach unten (10%l = 10% lower).",
+                "all move 10%u" to "Verschiebt das Bild um 10 % nach oben (10%u = 10% up).",
+                "u20% move 10%l" to "Unten 20 % abschneiden und direkt um 10 % nach unten verschieben.",
+                "all o20%" to "Oben (o) 20 % wegschneiden (geht auch mit r20% rechts und l20% links).",
                 "90 u90%" to "Schneidet unten 90 % weg – es bleibt oben nur noch ein schmaler 10%-Balken.",
-                "all u20% o10% l15% r15%" to "Mehrere Kanten gleichzeitig in einer Zeile kombinieren.",
             ),
         ),
         ManualSection(
-            title = "2. Bedingungen & Schleifen (if / while)",
+            title = "2. Schnittmarken (set cut) & Dahinter/Davor löschen (delete)",
+            codeExamples = listOf(
+                "set cut 00:48" to "Setzt Schnittmarke cut1 exakt bei Minute 00:48 (48 Sekunden).",
+                "delete after cut1" to "Löscht das gesamte Videomaterial hinter Schnittmarke cut1.",
+                "delete before cut1" to "Löscht das gesamte Videomaterial vor Schnittmarke cut1.",
+                "set cut2 01:15" to "Setzt eine zweite Schnittmarke cut2 bei 01:15.",
+            ),
+        ),
+        ManualSection(
+            title = "3. Bedingungen & Schleifen (if / while)",
             codeExamples = listOf(
                 "if caption red: u20%" to "Wenn ein roter Untertitel aktiv ist, dort unten 20 % wegschneiden.",
                 "if caption red: (9:16)" to "Wenn ein roter Untertitel aktiv ist, Format auf (9:16) setzen.",
@@ -1009,7 +1307,7 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
-            title = "3. Grundprinzip: Zeitbereiche & Kommazahlen",
+            title = "4. Grundprinzip: Zeitbereiche & Kommazahlen",
             codeExamples = listOf(
                 "10-24,3" to "Von Sekunde 10,0 bis Sekunde 24,3 schneiden (Komma oder Punkt erlaubt).",
                 "8-10" to "Zeitfenster von Sekunde 8 bis Sekunde 10.",
@@ -1018,7 +1316,7 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
-            title = "4. Auflösung & Format in Klammern (x:y)",
+            title = "5. Auflösung & Format in Klammern (x:y)",
             codeExamples = listOf(
                 "10-24,3 (8:15) 9 (16:18)" to "Mehrfach-Format: 10–24,3s im Format 8:15 und ab 9s im Format 16:18.",
                 "all (9:16)" to "Setzt das gesamte Video auf 9:16 Hochformat (Reels/Shorts).",
@@ -1027,7 +1325,7 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
-            title = "5. Untertitel & Text mit Punkt-Farben (.farbe)",
+            title = "6. Untertitel & Text mit Punkt-Farben (.farbe)",
             codeExamples = listOf(
                 "8-10 set caption: Pinker Honig.red" to "Zeigt von 8–10s den Untertitel 'Pinker Honig' in Rot (.red).",
                 "2-6 set caption: Mega Clip!.yellow.big" to "Großer gelber Untertitel von Sekunde 2 bis 6.",
@@ -1036,25 +1334,14 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
-            title = "6. Verfügbare Punkt-Modifier (.farbe, .font, .größe)",
+            title = "7. Verfügbare Punkt-Modifier & Effekte",
             codeExamples = listOf(
                 ".red .rot .pink .blue .blau .cyan" to "Textfarben: Rot, Pink, Blau, Cyan/Türkis.",
                 ".green .gruen .yellow .gelb .gold .orange" to "Textfarben: Grün, Gelb, Gold, Orange.",
-                ".purple .lila .white .weiss .black" to "Textfarben: Lila, Weiß, Schwarz.",
-                ".bgblack .bgred .bgblue .nobg" to "Hintergrund-Box-Farbe oder komplett transparenter Hintergrund (.nobg).",
                 ".sans .serif .mono .cursive .impact" to "Schriftart direkt im Befehl wechseln.",
-                ".small .big .huge .top .center .bottom" to "Schriftgröße und vertikale Position steuern.",
-            ),
-        ),
-        ManualSection(
-            title = "7. Effekte, Zoom, Blur & Undo",
-            codeExamples = listOf(
                 "zoom 1,8" to "Zoomt stufenlos ins Video (1.0x bis 5.0x).",
-                "crop 15%" to "Schneidet rundherum 15 % der Bildränder kleiner.",
                 "all set filter: cyberpunk" to "Aktiviert den Look-Filter (cyberpunk, cinematic, bw, vintage, vivid).",
-                "all set blur: 22.bokeh" to "Aktiviert Hintergrund-Unschärfe (bokeh, privacy, full, off).",
                 "undo" to "Macht den letzten Schritt rückgängig (redo stellt ihn wieder her).",
-                "reset" to "Setzt das Projekt auf den Ausgangszustand zurück.",
             ),
         ),
     )

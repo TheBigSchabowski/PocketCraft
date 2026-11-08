@@ -343,7 +343,9 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             0.dp
         }
 
-        // 1. Video-Layer (entweder echtes lokales Video vom Pixel 9 oder animierte 60fps Studio-Szene)
+        // 1. Video-Layer + Kanten-Zuschnitt-Maske (`u20%`, `o20%`, `r20%`, `l20%`, `u90%`) gemeinsam
+        //    in einem Transform-Container, sodass `all move 10%l` (oder `move 10%u`) das gesamte
+        //    geschnittene Bild exakt um die gewünschte Prozentzahl nach unten/oben/rechts/links verschiebt.
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -351,8 +353,8 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                 .graphicsLayer {
                     scaleX = transform.zoom
                     scaleY = transform.zoom
-                    translationX = transform.panX * canvasWidthPx * 0.35f
-                    translationY = transform.panY * canvasHeightPx * 0.35f
+                    translationX = transform.panX * canvasWidthPx
+                    translationY = transform.panY * canvasHeightPx
                     rotationZ = transform.rotationDegrees
                 },
         ) {
@@ -386,47 +388,47 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                     filterConfig = project.filter,
                 )
             }
-        }
 
-        // 2. Kleiner-Schneiden-Maske: schneidet die per `u20%`, `o20%`, `r20%`, `l20%`, `u90%`
-        //    oder Crop-Slider abgetrennten Bildbereiche sauber weg.
-        val hasCustomCrop = transform.cropLeft > 0.005f ||
-            transform.cropTop > 0.005f ||
-            transform.cropRight < 0.995f ||
-            transform.cropBottom < 0.995f
+            // 2. Kleiner-Schneiden-Maske: schneidet die per `u20%`, `o20%`, `r20%`, `l20%`, `u90%`
+            //    oder Crop-Slider abgetrennten Bildbereiche sauber weg.
+            val hasCustomCrop = transform.cropLeft > 0.005f ||
+                transform.cropTop > 0.005f ||
+                transform.cropRight < 0.995f ||
+                transform.cropBottom < 0.995f
 
-        if (hasCustomCrop || engine.activeTab.id == "crop") {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val leftPx = size.width * transform.cropLeft
-                val topPx = size.height * transform.cropTop
-                val rightPx = size.width * transform.cropRight
-                val bottomPx = size.height * transform.cropBottom
-                val cropW = (rightPx - leftPx).coerceAtLeast(6f)
-                val cropH = (bottomPx - topPx).coerceAtLeast(6f)
+            if (hasCustomCrop || engine.activeTab.id == "crop") {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val leftPx = size.width * transform.cropLeft
+                    val topPx = size.height * transform.cropTop
+                    val rightPx = size.width * transform.cropRight
+                    val bottomPx = size.height * transform.cropBottom
+                    val cropW = (rightPx - leftPx).coerceAtLeast(6f)
+                    val cropH = (bottomPx - topPx).coerceAtLeast(6f)
 
-                // Abgeschnittene Außenbereiche komplett wegschneiden (Studio-Schwarz),
-                // sodass z.B. bei `u90%` unten 90% verschwinden und oben nur der 10%-Balken bleibt.
-                val maskColor = Color(0xFF05070B).copy(alpha = 0.96f)
-                drawRect(maskColor, Offset(0f, 0f), Size(size.width, topPx))
-                drawRect(maskColor, Offset(0f, bottomPx), Size(size.width, size.height - bottomPx))
-                drawRect(maskColor, Offset(0f, topPx), Size(leftPx, cropH))
-                drawRect(maskColor, Offset(rightPx, topPx), Size(size.width - rightPx, cropH))
+                    // Abgeschnittene Außenbereiche komplett wegschneiden (Studio-Schwarz),
+                    // sodass z.B. bei `u90%` unten 90% verschwinden und oben nur der 10%-Balken bleibt.
+                    val maskColor = Color(0xFF05070B).copy(alpha = 0.96f)
+                    drawRect(maskColor, Offset(0f, 0f), Size(size.width, topPx))
+                    drawRect(maskColor, Offset(0f, bottomPx), Size(size.width, size.height - bottomPx))
+                    drawRect(maskColor, Offset(0f, topPx), Size(leftPx, cropH))
+                    drawRect(maskColor, Offset(rightPx, topPx), Size(size.width - rightPx, cropH))
 
-                // Rahmen für den verbleibenden Bildausschnitt
-                drawRect(
-                    color = if (hasCustomCrop) Color(0xFF00E5FF) else Color(0xFFFFD600),
-                    topLeft = Offset(leftPx, topPx),
-                    size = Size(cropW, cropH),
-                    style = Stroke(width = 1.5.dp.toPx()),
-                )
-                if (!engine.isCommandConsoleOpen && engine.activeTab.id == "crop") {
-                    val thirdW = cropW / 3f
-                    val thirdH = cropH / 3f
-                    val gridColor = Color.White.copy(alpha = 0.22f)
-                    drawLine(gridColor, Offset(leftPx + thirdW, topPx), Offset(leftPx + thirdW, bottomPx), 1f)
-                    drawLine(gridColor, Offset(leftPx + 2 * thirdW, topPx), Offset(leftPx + 2 * thirdW, bottomPx), 1f)
-                    drawLine(gridColor, Offset(leftPx, topPx + thirdH), Offset(rightPx, topPx + thirdH), 1f)
-                    drawLine(gridColor, Offset(leftPx, topPx + 2 * thirdH), Offset(rightPx, topPx + 2 * thirdH), 1f)
+                    // Rahmen für den verbleibenden Bildausschnitt
+                    drawRect(
+                        color = if (hasCustomCrop) Color(0xFF00E5FF) else Color(0xFFFFD600),
+                        topLeft = Offset(leftPx, topPx),
+                        size = Size(cropW, cropH),
+                        style = Stroke(width = 1.5.dp.toPx()),
+                    )
+                    if (!engine.isCommandConsoleOpen && engine.activeTab.id == "crop") {
+                        val thirdW = cropW / 3f
+                        val thirdH = cropH / 3f
+                        val gridColor = Color.White.copy(alpha = 0.22f)
+                        drawLine(gridColor, Offset(leftPx + thirdW, topPx), Offset(leftPx + thirdW, bottomPx), 1f)
+                        drawLine(gridColor, Offset(leftPx + 2 * thirdW, topPx), Offset(leftPx + 2 * thirdW, bottomPx), 1f)
+                        drawLine(gridColor, Offset(leftPx, topPx + thirdH), Offset(rightPx, topPx + thirdH), 1f)
+                        drawLine(gridColor, Offset(leftPx, topPx + 2 * thirdH), Offset(rightPx, topPx + 2 * thirdH), 1f)
+                    }
                 }
             }
         }
@@ -818,6 +820,17 @@ private fun TimelineScrubberBar(engine: ProjectEngine) {
                         start = Offset(sx, 3f),
                         end = Offset(ex, 3f),
                         strokeWidth = 3.5f,
+                    )
+                }
+
+                // Gesetzte Cut-Marker (`set cut 00:48` -> `cut1`) als rote Schnitt-Linien auf der Spur
+                project.cutMarkers.forEach { marker ->
+                    val cx = ((marker.timeMs / total) * size.width).coerceIn(0f, size.width)
+                    drawLine(
+                        color = Color(0xFFFF2D55),
+                        start = Offset(cx, 0f),
+                        end = Offset(cx, size.height),
+                        strokeWidth = 4.5f,
                     )
                 }
 

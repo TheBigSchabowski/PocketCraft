@@ -22,6 +22,7 @@ data class VideoProject(
     val filter: FilterConfig = FilterConfig(),
     val blur: BlurConfig = BlurConfig(),
     val timedFormatSpans: List<TimedFormatSpan> = emptyList(),
+    val cutMarkers: List<CutMarker> = emptyList(),
     val subtitles: List<SubtitleSegment> = defaultDemoSubtitles(),
     val overlays: List<CanvasOverlay> = defaultDemoOverlays(),
     val customFonts: List<CustomFontEntry> = emptyList(),
@@ -61,6 +62,8 @@ data class TimedFormatSpan(
     val cropTop: Float? = null,
     val cropRight: Float? = null,
     val cropBottom: Float? = null,
+    val panX: Float? = null,
+    val panY: Float? = null,
     val zoom: Float? = null,
     val filterPreset: VideoFilterPreset? = null,
     val blurRadiusPx: Float? = null,
@@ -73,11 +76,20 @@ data class TimedFormatSpan(
 }
 
 /**
+ * Benannter Schnittmarker auf der Timeline (z.B. `set cut 00:48` -> `cut1` bei 48.000 ms),
+ * auf den sich Folgekommandos wie `delete after cut1` oder `delete before cut1` beziehen.
+ */
+data class CutMarker(
+    val id: String,
+    val timeMs: Long,
+)
+
+/**
  * Zustand für Zoom, Pan (Verschiebung), Rotation und freies Kleiner-Schneiden (Crop-Ränder).
  *
  * - [zoom] vergrößert das Bild stufenlos (1.0x bis 5.0x), entweder per Pinch-to-Zoom direkt auf dem
  *   Video, per Slider oder per Befehl (`zoom 1.8`).
- * - [panX] / [panY] verschieben den Bildausschnitt normiert (-1.0 bis +1.0).
+ * - [panX] / [panY] verschieben den Bildausschnitt normiert (-1.0 bis +1.0, z.B. `all move 10%l` -> `panY = +0.10f`).
  * - [cropLeft] (`l%`), [cropTop] (`o%`), [cropRight] (`1 - r%`), [cropBottom] (`1 - u%`) schneiden
  *   das Bild an jeder Kante prozentgenau kleiner (normierte Koordinaten 0.0 bis 1.0).
  *   Beispiel: `all u20%` setzt `cropBottom = 0.80f` (untere 20% weggeschnitten);
@@ -93,7 +105,7 @@ data class CropZoomState(
     val cropRight: Float = 1.0f,
     val cropBottom: Float = 1.0f,
 ) {
-    /** Kompakte Zusammenfassung aktiver Kanten-Cuts wie `u20% r40%` (oder leer, falls 0%). */
+    /** Kompakte Zusammenfassung aktiver Kanten-Cuts & Verschiebungen wie `u20% move 10%l` (oder leer, falls 0%). */
     fun activeEdgeCropSummary(): String {
         val parts = mutableListOf<String>()
         val uPct = ((1f - cropBottom) * 100f).toInt()
@@ -104,6 +116,12 @@ data class CropZoomState(
         if (oPct > 0) parts.add("o${oPct}%")
         if (lPct > 0) parts.add("l${lPct}%")
         if (rPct > 0) parts.add("r${rPct}%")
+        val moveYPct = (panY * 100f).toInt()
+        val moveXPct = (panX * 100f).toInt()
+        if (moveYPct > 0) parts.add("move ${moveYPct}%l")
+        if (moveYPct < 0) parts.add("move ${-moveYPct}%u")
+        if (moveXPct > 0) parts.add("move ${moveXPct}%r")
+        if (moveXPct < 0) parts.add("move ${-moveXPct}%left")
         return parts.joinToString(" ")
     }
 }

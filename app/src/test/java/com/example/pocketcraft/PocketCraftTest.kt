@@ -153,6 +153,30 @@ class PocketCraftTest {
         val beforeEmojis = engine.project.overlays.size
         engine.executeCommand("while 0-12 step 4: set emoji: 🔥")
         assertEquals(beforeEmojis + 3, engine.project.overlays.size)
+
+        //    f) Prozentuale Bildverschiebung (`all move 10%l`, `all move 10%u`, `u20% move 10%l`)
+        //       sowie Schnittmarken (`set cut 00:48`) und Löschen hinter/vor dem Cut (`delete after cut1`):
+        engine.executeCommand("reset")
+        val fourStepScript = """
+            all u20%
+            all move 10%l
+            set cut 00:48
+            delete after cut1
+        """.trimIndent()
+        engine.executeCommand(fourStepScript)
+        assertEquals(0.80f, engine.project.transform.cropBottom, 0.01f)
+        assertEquals(0.10f, engine.project.transform.panY, 0.01f)
+        assertEquals("cut1", engine.project.cutMarkers.first().id)
+        assertEquals(48_000L, engine.project.cutMarkers.first().timeMs)
+        assertEquals(48_000L, engine.project.trimEndMs)
+
+        // Auch als einzeilige nummerierte Folge (`1. all u20% 2. all move 10%l 3. set cut 00:48 4. delete after cut1`)
+        // und mit `move 10%u` (10% up) sowie `delete before cut1`:
+        engine.executeCommand("reset")
+        engine.executeCommand("1. all u20% 2. all move 10%u 3. set cut 00:48 4. delete before cut1")
+        assertEquals(0.80f, engine.project.transform.cropBottom, 0.01f)
+        assertEquals(-0.10f, engine.project.transform.panY, 0.01f)
+        assertEquals(48_000L, engine.project.trimStartMs)
     }
 
     @Test

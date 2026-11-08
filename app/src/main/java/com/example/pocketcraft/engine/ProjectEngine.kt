@@ -791,6 +791,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 cropTop = top.coerceIn(0f, 0.98f),
                 cropRight = right.coerceIn((left + 0.02f).coerceAtMost(1f), 1f),
                 cropBottom = bottom.coerceIn((top + 0.02f).coerceAtMost(1f), 1f),
+                panX = (span.panX ?: current.panX).coerceIn(-1f, 1f),
+                panY = (span.panY ?: current.panY).coerceIn(-1f, 1f),
                 zoom = span.zoom ?: current.zoom,
             )
         }
@@ -810,6 +812,13 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             val secs = totalTenths / 10
             val tenths = totalTenths % 10
             return "${secs}.${tenths}s"
+        }
+
+        fun formatTimecode(ms: Long): String {
+            val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+            val mins = totalSeconds / 60L
+            val secs = totalSeconds % 60L
+            return "%02d:%02d".format(mins, secs)
         }
     }
 }
