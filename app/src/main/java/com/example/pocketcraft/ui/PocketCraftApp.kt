@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
@@ -51,6 +52,12 @@ fun PocketCraftApp(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE ||
         configuration.screenWidthDp > configuration.screenHeightDp
+
+    // Automatisches Speichern ein paar Sekunden nach der letzten Änderung
+    LaunchedEffect(engine.project) {
+        kotlinx.coroutines.delay(4_000L)
+        engine.autosave()
+    }
 
     MaterialTheme(colorScheme = PocketCraftDarkPalette) {
         Box(
@@ -99,6 +106,13 @@ fun PocketCraftApp(
                             .fillMaxWidth(),
                     )
                 }
+            }
+
+            if (engine.isProjectsDialogOpen) {
+                ProjectsDialog(
+                    engine = engine,
+                    onClose = { engine.isProjectsDialogOpen = false },
+                )
             }
 
             // Optionaler PDF-Anleitungs-Viewer & Generator (wird über "📄 PDF" oder Befehl "pdf" geöffnet)

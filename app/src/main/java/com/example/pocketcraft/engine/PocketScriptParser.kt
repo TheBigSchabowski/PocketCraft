@@ -107,6 +107,12 @@ object PocketScriptParser {
         option = RegexOption.IGNORE_CASE,
     )
 
+    // Regex für `delete 10-20` / `delete 00:10-00:20` (Mittelstück herausschneiden)
+    private val deleteRangeRegex = Regex(
+        pattern = """^(?:delete|del|remove|lösche|loesche)\s+(\d+(?::\d+)*(?:[.,]\d+)?)\s*-\s*(\d+(?::\d+)*(?:[.,]\d+)?)$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+
     // Regex für `<Zeitbereich> set <ziel>: <inhalt>`
     // Beispiel: `8-10 set caption: Pinker Honig.red` oder `all set filter: cyberpunk`
     private val setStatementRegex = Regex(
@@ -222,6 +228,14 @@ object PocketScriptParser {
             val dir = delMatch.groupValues[1].lowercase()
             val target = delMatch.groupValues[2].trim()
             return executeDeleteCutStatement(dir, target, engine)
+        }
+
+        // 0d. Prüfen auf `delete 10-20` (Bereich mitten aus dem Video herausschneiden)
+        val delRangeMatch = deleteRangeRegex.matchEntire(input)
+        if (delRangeMatch != null) {
+            val startMs = parseSecondsToMs(delRangeMatch.groupValues[1])
+            val endMs = parseSecondsToMs(delRangeMatch.groupValues[2])
+            return executeRemoveRange(startMs, endMs, engine)
         }
 
         // 1. Prüfen auf `<Zeitbereich> set <Ziel>: <Wert.modifier>`
@@ -521,7 +535,24 @@ object PocketScriptParser {
         targetRaw: String,
         engine: ProjectEngine,
     ): String {
-        val dir = dirRaw.lowercase().trim()
+        val dir = dirRaw.lowercase().trim().replace(Regex("\\s+"), " ")
+
+        // `delete between cut1 cut2` / `delete zwischen cut1 und cut2` / `delete between 00:10 00:20`
+        if (dir == "between" || dir == "zwischen") {
+            val parts = targetRaw.trim()
+                .split(Regex("""\s*(?:\band\b|\bund\b|&|,|\s)\s*|(?<=[a-z0-9])-(?=[a-z0-9])""", RegexOption.IGNORE_CASE))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            if (parts.size != 2) {
+                return "Syntax: delete between cut1 cut2 (oder delete between 00:10 00:20)"
+            }
+            val a = resolveCutOrTime(parts[0], engine)
+                ?: return "Cut-Marker '${parts[0]}' nicht gefunden. Setze zuerst z.B. 'set cut1 00:10'."
+            val b = resolveCutOrTime(parts[1], engine)
+                ?: return "Cut-Marker '${parts[1]}' nicht gefunden. Setze zuerst z.B. 'set cut2 00:20'."
+            return executeRemoveRange(a, b, engine)
+        }
+
         val cleanTarget = targetRaw.trim().lowercase().replace(Regex("\\s+"), "")
 
         // Ziel-Zeitpunkt bestimmen: entweder über `cut1` / `cut2` / `cut` oder direkt als Zeit `00:48`
@@ -592,6 +623,37 @@ object PocketScriptParser {
             }
             engine.playheadMs = engine.project.trimStartMs
             "Alles vor $markerLabel ($timeLabel / ${ProjectEngine.formatSec(cutTimeMs)}) gelöscht – Video startet jetzt bei $timeLabel."
+        }
+    }
+
+    /** Löst `cut1` / `cut` / `00:48` / `12,5` in Millisekunden auf (oder `null`, falls Marker fehlt). */
+    private fun resolveCutOrTime(token: String, engine: ProjectEngine): Long? {
+        val clean = token.trim().lowercase()
+        if (clean.startsWith("cut")) {
+            val num = clean.removePrefix("cut")
+            val marker = if (num.isEmpty()) {
+                engine.project.cutMarkers.lastOrNull()
+            } else {
+                engine.project.cutMarkers.firstOrNull { it.id.equals("cut$num", ignoreCase = true) }
+            }
+            return marker?.timeMs
+        }
+        if (!Regex("""^\d+(?::\d+)*(?:[.,]\d+)?(?:s|sek)?$""").matches(clean)) return null
+        return parseSecondsToMs(clean)
+    }
+
+    private fun executeRemoveRange(startMs: Long, endMs: Long, engine: ProjectEngine): String {
+        val s = minOf(startMs, endMs)
+        val e = maxOf(startMs, endMs)
+        val sLabel = ProjectEngine.formatTimecode(s)
+        val eLabel = ProjectEngine.formatTimecode(e)
+        if (s >= engine.project.sourceDurationMs) {
+            return "Bereich $sLabel–$eLabel liegt hinter dem Videoende (${ProjectEngine.formatTimecode(engine.project.sourceDurationMs)})."
+        }
+        return if (engine.addRemovedRange(s, e)) {
+            "Bereich $sLabel–$eLabel herausgeschnitten – wird beim Abspielen übersprungen (Rest: ${ProjectEngine.formatSec(engine.project.playableDurationMs)})."
+        } else {
+            "Bereich $sLabel–$eLabel ist zu kurz (mind. 0,1s)."
         }
     }
 
@@ -1293,6 +1355,32 @@ object PocketScriptPdfManualGenerator {
                 "delete after cut1" to "Löscht das gesamte Videomaterial hinter Schnittmarke cut1.",
                 "delete before cut1" to "Löscht das gesamte Videomaterial vor Schnittmarke cut1.",
                 "set cut2 01:15" to "Setzt eine zweite Schnittmarke cut2 bei 01:15.",
+                "delete between cut1 cut2" to "Schneidet das Stück zwischen cut1 und cut2 heraus (wird übersprungen).",
+                "delete 10-20" to "Schneidet Sekunde 10 bis 20 aus der Mitte des Videos heraus.",
+            ),
+        ),
+        ManualSection(
+            title = "2a. Untertitel, Texte & Emojis löschen (clear)",
+            codeExamples = listOf(
+                "clear all captions" to "Löscht alle Untertitel.",
+                "clear caption1" to "Löscht den ersten Untertitel (nach Startzeit, 'captions' zeigt die Liste).",
+                "clear caption Hallo" to "Löscht alle Untertitel, die 'Hallo' enthalten.",
+                "clear texts" to "Löscht alle Text-Overlays (clear text2 = nur den zweiten).",
+                "clear emojis" to "Löscht alle Emojis (clear emoji1 = nur das erste).",
+                "clear cuts" to "Entfernt alle Schnittmarken und herausgeschnittenen Bereiche.",
+                "clear all" to "Löscht alle Untertitel, Texte und Emojis auf einmal.",
+            ),
+        ),
+        ManualSection(
+            title = "2b. Projekte speichern & öffnen",
+            codeExamples = listOf(
+                "save" to "Speichert das aktuelle Projekt (wird auch automatisch gespeichert).",
+                "save Urlaub 2026" to "Speichert und benennt das Projekt in 'Urlaub 2026' um.",
+                "save as Version 2" to "Speichert eine Kopie als neues Projekt 'Version 2'.",
+                "projects" to "Zeigt alle gespeicherten Projekte an.",
+                "open Urlaub" to "Öffnet das Projekt mit diesem Namen (oder 'open 1' für das neueste).",
+                "new Mein Reel" to "Legt ein neues, leeres Projekt an.",
+                "export" to "Exportiert das Projekt (wie die Export-Taste).",
             ),
         ),
         ManualSection(

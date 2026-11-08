@@ -10,10 +10,14 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import com.example.pocketcraft.engine.ProjectEngine
+import com.example.pocketcraft.engine.ProjectStore
+import java.nio.file.Files
 import com.example.pocketcraft.model.AspectRatioPreset
 import com.example.pocketcraft.model.BlurMode
 import com.example.pocketcraft.model.VideoFilterPreset
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -182,7 +186,7 @@ class PocketCraftTest {
     @Test
     fun launchesActivityAndTwoSecondHoldReplacesBottomThirdWithMultilineCodeEditor() {
         // App startet mit oberer Vorschau und unterem 1/3 Funktionsbereich
-        rule.onNodeWithText("POCKETCRAFT").assertExists()
+        rule.onNodeWithText("⬆ Export").assertExists()
         rule.onNodeWithText("Zoom & Schnitt").assertExists()
 
         // Wir führen eine Änderung aus (z.B. Wechsel auf 1:1 Quadrat)
@@ -202,7 +206,7 @@ class PocketCraftTest {
 
         // Das normale Schnitt-Menü ("Zoom & Schnitt") ist jetzt durch den mehrzeiligen Code-Editor ersetzt,
         // während das Video oben ("POCKETCRAFT") voll sichtbar bleibt!
-        rule.onNodeWithText("POCKETCRAFT").assertExists()
+        rule.onNodeWithText("⬆ Export").assertExists()
         rule.onNodeWithText("Zoom & Schnitt").assertDoesNotExist()
         rule.onNodeWithText("⚡ POCKETSCRIPT").assertExists()
 
@@ -220,6 +224,11 @@ class PocketCraftTest {
         assertEquals(AspectRatioPreset.PORTRAIT_9_16, MainActivity.sharedEngine.project.aspectRatio)
         assertTrue(MainActivity.sharedEngine.project.subtitles.any { it.text == "Pinker Honig" && it.textColorArgb == 0xFFFF3B30L })
 
+        // Nach Befehlen bleibt die Speichern-Taste sichtbar und funktioniert
+        rule.onNodeWithText("💾 Speichern").assertExists().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("✓ Gespeichert").assertExists()
+
         // PDF-Handbuch öffnen und prüfen, dass Antippen eines Befehls ihn in die Zwischenablage kopiert
         MainActivity.sharedEngine.isPdfManualOpen = true
         rule.waitForIdle()
@@ -232,5 +241,133 @@ class PocketCraftTest {
         MainActivity.sharedEngine.isCommandConsoleOpen = false
         MainActivity.sharedEngine.scriptEditorText = ""
         rule.waitForIdle()
+    }
+
+    @Test
+    fun saveCommandAndProjectsPersistAndReopen() {
+        val dir = Files.createTempDirectory("pc_projects").toFile()
+        val engine = ProjectEngine().apply { projectStore = ProjectStore(dir) }
+
+        engine.executeCommand("zoom 2")
+        val saveMsg = engine.executeCommand("save Urlaub")
+        assertTrue(saveMsg, saveMsg.contains("gespeichert"))
+        assertEquals("Urlaub", engine.project.title)
+        assertFalse(engine.hasUnsavedChanges)
+        assertEquals(1, engine.savedProjects.size)
+
+        engine.executeCommand("new Zweites")
+        assertEquals("Zweites", engine.project.title)
+        assertEquals(1.0f, engine.project.transform.zoom, 0.01f)
+        engine.executeCommand("save")
+        assertEquals(2, engine.savedProjects.size)
+
+        // Neue Engine (wie nach App-Neustart) stellt letztes Projekt wieder her und kann alte öffnen
+        val restarted = ProjectEngine().apply { projectStore = ProjectStore(dir) }
+        restarted.restoreLastSession()
+        assertEquals("Zweites", restarted.project.title)
+        val openMsg = restarted.executeCommand("open Urlaub")
+        assertTrue(openMsg, openMsg.contains("geöffnet"))
+        assertEquals(2.0f, restarted.project.transform.zoom, 0.01f)
+
+        val id = restarted.currentProjectId
+        assertNotNull(id)
+        restarted.deleteProject(id!!)
+        assertEquals(1, restarted.savedProjects.size)
+    }
+
+    @Test
+    fun deletedRangesAreSkippedAndRealVideoLengthIsNotExtended() {
+        val engine = ProjectEngine()
+        engine.setVideoSource("content://test/video.mp4", 30_000L, "Clip")
+
+        // Cut-Marker hinter dem Videoende darf die echte Videolänge nicht verlängern
+        engine.executeCommand("set cut 00:48")
+        assertEquals(30_000L, engine.project.sourceDurationMs)
+        assertTrue(engine.project.trimEndMs <= 30_000L)
+
+        engine.executeCommand("set cut1 00:10")
+        engine.executeCommand("set cut2 00:20")
+        engine.executeCommand("delete between cut1 cut2")
+        assertEquals(1, engine.project.removedRanges.size)
+        assertEquals(10_000L, engine.project.removedRanges[0].startMs)
+        assertEquals(20_000L, engine.project.removedRanges[0].endMs)
+        // Abspielposition im gelöschten Bereich springt hinter den Schnitt
+        assertEquals(20_000L, engine.project.resolvePlayablePosition(12_000L))
+        assertEquals(20_000L, engine.project.playableDurationMs)
+
+        engine.executeCommand("delete 2-4")
+        assertEquals(2, engine.project.removedRanges.size)
+
+        // Demo-Playhead-Schleife bleibt innerhalb von Trim-Grenzen
+        engine.executeCommand("delete after cut2")
+        assertEquals(20_000L, engine.project.trimEndMs)
+        engine.playheadMs = 19_990L
+        engine.advancePlayhead(50L)
+        assertEquals(0L, engine.playheadMs)
+
+        // Player meldet echte Länge: Schnitte bleiben erhalten
+        engine.syncRealVideoDuration(29_500L)
+        assertEquals(20_000L, engine.project.trimEndMs)
+        assertEquals(2, engine.project.removedRanges.size)
+    }
+
+    @Test
+    fun sliderGesturesCoalesceIntoSingleUndoStep() {
+        val engine = ProjectEngine()
+        repeat(30) { i -> engine.setZoomAndPan(zoom = 1.0f + i * 0.05f) }
+        assertEquals(1, engine.undoCount)
+        engine.undo()
+        assertEquals(1.0f, engine.project.transform.zoom, 0.01f)
+
+        // Konsolenbefehle bleiben einzelne Schritte
+        engine.executeCommand("zoom 2")
+        engine.executeCommand("zoom 3")
+        assertEquals(2, engine.undoCount)
+    }
+
+    @Test
+    fun clearCommandsRemoveCaptionsTextsAndEmojis() {
+        val engine = ProjectEngine()
+        assertEquals(4, engine.project.subtitles.size)
+        val second = engine.project.subtitles.sortedBy { it.startMs }[1].text
+        engine.executeCommand("clear caption2")
+        assertEquals(3, engine.project.subtitles.size)
+        assertFalse(engine.project.subtitles.any { it.text == second })
+
+        engine.executeCommand("clear caption Konsole")
+        assertEquals(2, engine.project.subtitles.size)
+
+        engine.executeCommand("clear all captions")
+        assertEquals(0, engine.project.subtitles.size)
+
+        engine.executeCommand("clear emoji1")
+        assertFalse(engine.project.overlays.any { it.kind == com.example.pocketcraft.model.OverlayKind.EMOJI })
+        engine.executeCommand("clear texts")
+        assertEquals(0, engine.project.overlays.size)
+
+        engine.undo()
+        assertEquals(1, engine.project.overlays.size)
+        engine.executeCommand("clear all")
+        assertEquals(0, engine.project.overlays.size)
+    }
+
+    @Test
+    fun userScriptOnRealVideoCropsMovesCutsAndSaves() {
+        val dir = Files.createTempDirectory("pc_user").toFile()
+        val engine = ProjectEngine().apply { projectStore = ProjectStore(dir) }
+        engine.setVideoSource("content://com.android.providers.media.documents/document/video%3A1000089402", 53_455L, "VID-20261010-WA0068(2).mp4")
+
+        val result = engine.executeCommand("all u20%\nall move 10%l\nset cut 00:42\ndelete after cut1\nsave")
+        val p = engine.project
+        assertEquals(result, 0.80f, p.transform.cropBottom, 0.001f)
+        assertEquals(0.10f, p.transform.panY, 0.001f)
+        assertEquals(53_455L, p.sourceDurationMs)
+        assertEquals(42_000L, p.trimEndMs)
+        assertEquals(0L, p.trimStartMs)
+        assertFalse(engine.hasUnsavedChanges)
+        assertEquals(1, engine.savedProjects.size)
+
+        // Wiedergabe loopt bei 42s zurück an den Anfang
+        assertEquals(42_000L, p.resolvePlayablePosition(50_000L))
     }
 }

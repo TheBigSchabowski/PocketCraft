@@ -1,6 +1,7 @@
 package com.example.pocketcraft.model
 
-import androidx.compose.ui.graphics.Color
+import kotlinx.serialization.Serializable
+import kotlin.math.roundToInt
 
 /**
  * Unveränderliches Datenmodell eines kompletten Video-Schnittprojekts (inspiriert von storytold/filmcraft).
@@ -10,6 +11,7 @@ import androidx.compose.ui.graphics.Color
  * alle Aktionen – ob über das Touch-UI im unteren Drittel oder über die 2-Sekunden-Befehlskonsole –
  * jederzeit mit `undo` / `redo` umkehrbar.
  */
+@Serializable
 data class VideoProject(
     val title: String = "Pixel 9 Reel #1",
     val videoUri: String? = null,
@@ -23,6 +25,8 @@ data class VideoProject(
     val blur: BlurConfig = BlurConfig(),
     val timedFormatSpans: List<TimedFormatSpan> = emptyList(),
     val cutMarkers: List<CutMarker> = emptyList(),
+    /** Herausgeschnittene Bereiche mitten im Clip (`delete 10-20`, `delete between cut1 cut2`). */
+    val removedRanges: List<RemovedRange> = emptyList(),
     val subtitles: List<SubtitleSegment> = defaultDemoSubtitles(),
     val overlays: List<CanvasOverlay> = defaultDemoOverlays(),
     val customFonts: List<CustomFontEntry> = emptyList(),
@@ -31,11 +35,105 @@ data class VideoProject(
     /** Effektive Länge des geschnittenen Clips in Millisekunden. */
     val trimmedDurationMs: Long
         get() = (trimEndMs - trimStartMs).coerceAtLeast(500L)
+
+    /** Effektive Abspieldauer: Trim-Bereich minus aller herausgeschnittenen Mittelstücke. */
+    val playableDurationMs: Long
+        get() {
+            var removed = 0L
+            for (r in removedRanges) {
+                val s = maxOf(r.startMs, trimStartMs)
+                val e = minOf(r.endMs, trimEndMs)
+                if (e > s) removed += e - s
+            }
+            return (trimmedDurationMs - removed).coerceAtLeast(0L)
+        }
+
+    /**
+     * Zum Zeitpunkt [atMs] gültiger Zoom/Pan/Zuschnitt: globaler [transform] kombiniert mit
+     * zeitgebundenen Kanten-Zuschnitten (`u20%`, `o20%`, …) aus [timedFormatSpans].
+     * Wird von Vorschau UND Video-Export genutzt.
+     */
+    fun transformAt(atMs: Long): CropZoomState {
+        var current = transform
+        val activeSpans = timedFormatSpans.filter { atMs in it.startMs..it.endMs }
+        for (span in activeSpans) {
+            var left = span.cropLeft ?: current.cropLeft
+            var top = span.cropTop ?: current.cropTop
+            var right = span.cropRight ?: current.cropRight
+            var bottom = span.cropBottom ?: current.cropBottom
+            if (span.cropBottom != null && top >= bottom - 0.02f) {
+                top = 0.0f
+            }
+            if (span.cropTop != null && bottom <= top + 0.02f) {
+                bottom = 1.0f
+            }
+            if (span.cropRight != null && left >= right - 0.02f) {
+                left = 0.0f
+            }
+            if (span.cropLeft != null && right <= left + 0.02f) {
+                right = 1.0f
+            }
+            current = current.copy(
+                cropLeft = left.coerceIn(0f, 0.98f),
+                cropTop = top.coerceIn(0f, 0.98f),
+                cropRight = right.coerceIn((left + 0.02f).coerceAtMost(1f), 1f),
+                cropBottom = bottom.coerceIn((top + 0.02f).coerceAtMost(1f), 1f),
+                panX = (span.panX ?: current.panX).coerceIn(-1f, 1f),
+                panY = (span.panY ?: current.panY).coerceIn(-1f, 1f),
+                zoom = span.zoom ?: current.zoom,
+            )
+        }
+        return current
+    }
+
+    /**
+     * Die tatsächlich abgespielten/exportierten Abschnitte: Trim-Bereich ohne herausgeschnittene
+     * Mittelstücke, als Liste von (Start, Ende) in Millisekunden.
+     */
+    fun playableSegments(): List<Pair<Long, Long>> {
+        val result = mutableListOf<Pair<Long, Long>>()
+        var cursor = trimStartMs
+        for (r in removedRanges.sortedBy { it.startMs }) {
+            if (r.endMs <= cursor) continue
+            if (r.startMs >= trimEndMs) break
+            if (r.startMs > cursor) result.add(cursor to minOf(r.startMs, trimEndMs))
+            cursor = maxOf(cursor, r.endMs)
+        }
+        if (cursor < trimEndMs) result.add(cursor to trimEndMs)
+        return result.filter { it.second - it.first >= 100L }
+    }
+
+    /** Liegt [ms] in einem herausgeschnittenen Bereich, gibt den Bereich zurück, sonst `null`. */
+    fun removedRangeAt(ms: Long): RemovedRange? = removedRanges.firstOrNull { ms >= it.startMs && ms < it.endMs }
+
+    /**
+     * Korrigiert eine Abspielposition so, dass sie innerhalb von Trim-Start/-Ende liegt und
+     * keine herausgeschnittenen Bereiche trifft (springt hinter den Schnitt).
+     */
+    fun resolvePlayablePosition(ms: Long): Long {
+        var pos = ms.coerceIn(trimStartMs, trimEndMs)
+        var guard = 0
+        while (guard++ < 32) {
+            val hit = removedRangeAt(pos) ?: break
+            pos = hit.endMs
+        }
+        return if (pos >= trimEndMs) trimEndMs else pos
+    }
 }
+
+/**
+ * Ein aus der Mitte des Videos herausgeschnittener Bereich (wird beim Abspielen übersprungen).
+ */
+@Serializable
+data class RemovedRange(
+    val startMs: Long,
+    val endMs: Long,
+)
 
 /**
  * Seitenverhältnis-Presets für den Schnitt (insbesondere zum Kleiner-Schneiden / Formatwechsel).
  */
+@Serializable
 enum class AspectRatioPreset(val label: String, val ratioWidth: Float, val ratioHeight: Float, val cliAlias: String) {
     PORTRAIT_9_16("9:16 Reel", 9f, 16f, "9:16"),
     SQUARE_1_1("1:1 Quadrat", 1f, 1f, "1:1"),
@@ -51,6 +149,7 @@ enum class AspectRatioPreset(val label: String, val ratioWidth: Float, val ratio
  * und Zoom-Regel aus der PocketScript-Sprache,
  * z.B. `10-24,3 (8:15) 9 (16:18)`, `all (9:16)`, `all u20%` oder `90 u90%`.
  */
+@Serializable
 data class TimedFormatSpan(
     val id: String,
     val startMs: Long,
@@ -79,6 +178,7 @@ data class TimedFormatSpan(
  * Benannter Schnittmarker auf der Timeline (z.B. `set cut 00:48` -> `cut1` bei 48.000 ms),
  * auf den sich Folgekommandos wie `delete after cut1` oder `delete before cut1` beziehen.
  */
+@Serializable
 data class CutMarker(
     val id: String,
     val timeMs: Long,
@@ -95,6 +195,7 @@ data class CutMarker(
  *   Beispiel: `all u20%` setzt `cropBottom = 0.80f` (untere 20% weggeschnitten);
  *   `u90%` setzt `cropBottom = 0.10f` (untere 90% weg, nur noch ein 10%-Balken oben sichtbar).
  */
+@Serializable
 data class CropZoomState(
     val zoom: Float = 1.0f,
     val panX: Float = 0.0f,
@@ -108,16 +209,16 @@ data class CropZoomState(
     /** Kompakte Zusammenfassung aktiver Kanten-Cuts & Verschiebungen wie `u20% move 10%l` (oder leer, falls 0%). */
     fun activeEdgeCropSummary(): String {
         val parts = mutableListOf<String>()
-        val uPct = ((1f - cropBottom) * 100f).toInt()
-        val oPct = (cropTop * 100f).toInt()
-        val lPct = (cropLeft * 100f).toInt()
-        val rPct = ((1f - cropRight) * 100f).toInt()
+        val uPct = ((1f - cropBottom) * 100f).roundToInt()
+        val oPct = (cropTop * 100f).roundToInt()
+        val lPct = (cropLeft * 100f).roundToInt()
+        val rPct = ((1f - cropRight) * 100f).roundToInt()
         if (uPct > 0) parts.add("u${uPct}%")
         if (oPct > 0) parts.add("o${oPct}%")
         if (lPct > 0) parts.add("l${lPct}%")
         if (rPct > 0) parts.add("r${rPct}%")
-        val moveYPct = (panY * 100f).toInt()
-        val moveXPct = (panX * 100f).toInt()
+        val moveYPct = (panY * 100f).roundToInt()
+        val moveXPct = (panX * 100f).roundToInt()
         if (moveYPct > 0) parts.add("move ${moveYPct}%l")
         if (moveYPct < 0) parts.add("move ${-moveYPct}%u")
         if (moveXPct > 0) parts.add("move ${moveXPct}%r")
@@ -130,6 +231,7 @@ data class CropZoomState(
  * Eingebaute Farbfilter + feinjustierbare Grading-Parameter.
  * Werden sowohl in der Live-Vorschau (über ColorMatrix) als auch beim MP4-Export pixelgenau angewendet.
  */
+@Serializable
 enum class VideoFilterPreset(
     val id: String,
     val displayName: String,
@@ -162,6 +264,7 @@ enum class VideoFilterPreset(
 /**
  * Aktive Filtereinstellung inkl. Intensitätsregler und manueller Farbkorrektur.
  */
+@Serializable
 data class FilterConfig(
     val preset: VideoFilterPreset = VideoFilterPreset.NONE,
     val intensity: Float = 1.0f,
@@ -174,6 +277,7 @@ data class FilterConfig(
 /**
  * Modi für den Unschärfe-Effekt (Blur).
  */
+@Serializable
 enum class BlurMode(val id: String, val label: String, val description: String) {
     OFF("off", "Aus", "Keine Unschärfe"),
     FULL_FRAME("full", "Gesamtes Bild", "Weichzeichner über das gesamte Video"),
@@ -185,6 +289,7 @@ enum class BlurMode(val id: String, val label: String, val description: String) 
 /**
  * Konfiguration für den Blur-Effekt inkl. frei platzierbarer Zensur-/Fokus-Zone.
  */
+@Serializable
 data class BlurConfig(
     val mode: BlurMode = BlurMode.OFF,
     val radiusPx: Float = 14f,
@@ -198,6 +303,7 @@ data class BlurConfig(
  * Einzelnes Untertitel-Segment auf der Timeline.
  * Unterstützt auch Wort-für-Wort-Hervorhebung (Karaoke-Style) wie bei modernen Reels/Shorts.
  */
+@Serializable
 data class SubtitleSegment(
     val id: String,
     val startMs: Long,
@@ -216,11 +322,13 @@ data class SubtitleSegment(
  * Frei platzierbares Overlay auf dem Video-Canvas: entweder ein gestalteter Text-Layer
  * oder ein großer Emoji-/Sticker-Layer mit eigenem Zeitbereich, Skalierung und Drehung.
  */
+@Serializable
 enum class OverlayKind {
     TEXT,
     EMOJI
 }
 
+@Serializable
 data class CanvasOverlay(
     val id: String,
     val kind: OverlayKind,
@@ -239,6 +347,7 @@ data class CanvasOverlay(
 /**
  * Mitgelieferte System- und Design-Schriftarten, die sofort ohne Nachladen bereitstehen.
  */
+@Serializable
 enum class BuiltInFont(val id: String, val displayName: String, val sampleTag: String) {
     SANS_BOLD("sans_bold", "Roboto Black (Reels)", "MODERN"),
     SERIF_CINEMA("serif_cinema", "Playfair Serif (Kino)", "CLASSIC"),
@@ -251,6 +360,7 @@ enum class BuiltInFont(val id: String, val displayName: String, val sampleTag: S
 /**
  * Vom Nutzer zur Laufzeit hinzugefügte eigene Schriftart (.ttf / .otf Datei vom Pixel 9 Speicher).
  */
+@Serializable
 data class CustomFontEntry(
     val id: String,
     val displayName: String,

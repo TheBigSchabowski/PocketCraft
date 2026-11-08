@@ -1,12 +1,11 @@
 package com.example.pocketcraft.ui
 
-import android.net.Uri
-import android.widget.VideoView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -55,10 +55,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.example.pocketcraft.engine.FontRegistry
 import com.example.pocketcraft.engine.ProjectEngine
 import com.example.pocketcraft.model.BlurMode
@@ -117,19 +117,19 @@ fun VideoStageArea(
 ) {
     val project = engine.project
 
-    // Playhead-Taktgeber während die Vorschau läuft
-    LaunchedEffect(engine.isPlaying, project.playbackSpeed, project.trimStartMs, project.trimEndMs) {
-        if (engine.isPlaying) {
+    // Playhead-Taktgeber für die Demo-Szene (bei echten Videos treibt der Player den Playhead).
+    // Hält Trim-Start/-Ende ein und überspringt herausgeschnittene Bereiche.
+    val hasRealVideo = project.videoUri != null
+    LaunchedEffect(engine.isPlaying, hasRealVideo) {
+        if (engine.isPlaying && !hasRealVideo) {
             val stepMs = 33L
+            engine.playheadMs = engine.project.resolvePlayablePosition(engine.playheadMs).let {
+                if (it >= engine.project.trimEndMs) engine.project.trimStartMs else it
+            }
             while (engine.isPlaying) {
                 delay(stepMs)
-                val delta = (stepMs * project.playbackSpeed).toLong().coerceAtLeast(10L)
-                val next = engine.playheadMs + delta
-                engine.playheadMs = if (next >= project.trimEndMs) {
-                    project.trimStartMs
-                } else {
-                    next
-                }
+                val delta = (stepMs * engine.project.playbackSpeed).toLong().coerceAtLeast(10L)
+                engine.advancePlayhead(delta)
             }
         }
     }
@@ -167,6 +167,8 @@ fun VideoStageArea(
                         text = msg,
                         color = Color(0xFF80DEEA),
                         fontSize = 11.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
@@ -202,49 +204,65 @@ private fun StageTopBar(
     onExportVideo: () -> Unit,
 ) {
     val project = engine.project
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        // Links: App-Badge + Format-Anzeige
+    // Zwei Zeilen, bei denen der Text links per weight() schrumpft (mit "…") – so können lange
+    // Format-Anzeigen nach PocketScript-Befehlen (z.B. "9:16 · u20% move 10%l") die Knöpfe
+    // rechts (Speichern/Export) nicht mehr aus dem Bildschirm schieben.
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Surface(
-                color = Color(0xFF00E5FF).copy(alpha = 0.16f),
-                shape = RoundedCornerShape(6.dp),
-            ) {
-                Text(
-                    text = "POCKETCRAFT",
-                    color = Color(0xFF00E5FF),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                )
-            }
-            Text(
-                text = "${engine.currentFormatLabel()} · ${(project.transform.zoom * 10).roundToInt() / 10f}x",
-                color = Color(0xFF9AA5B8),
-                fontSize = 11.sp,
-            )
-        }
-
-        // Rechts: Schnell-Aktionen (Undo, PDF-Anleitung, Video öffnen, Konsole, Export)
-        Row(
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
+            Surface(
+                color = Color(0xFF00E5FF).copy(alpha = 0.16f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable {
+                        engine.refreshProjectList()
+                        engine.isProjectsDialogOpen = true
+                    },
+            ) {
+                Text(
+                    text = "📁 ${project.title}${if (engine.hasUnsavedChanges) " •" else ""}",
+                    color = Color(0xFF00E5FF),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                )
+            }
             TopPillButton(
                 label = "↶ ${engine.undoCount}",
                 enabled = engine.canUndo,
                 onClick = { engine.undo() },
             )
             TopPillButton(
-                label = "📄 PDF",
+                label = "↷",
+                enabled = engine.canRedo,
+                onClick = { engine.redo() },
+            )
+            TopPillButton(
+                label = if (engine.hasUnsavedChanges) "💾 Speichern" else "✓ Gespeichert",
                 enabled = true,
-                onClick = { engine.isPdfManualOpen = true },
+                highlight = engine.hasUnsavedChanges,
+                onClick = { engine.statusBanner = engine.saveCurrentProject() },
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Text(
+                text = "${engine.currentFormatLabel()} · ${(project.transform.zoom * 10).roundToInt() / 10f}x",
+                color = Color(0xFF9AA5B8),
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
             TopPillButton(
                 label = "📂 Video",
@@ -258,9 +276,14 @@ private fun StageTopBar(
                 onClick = { engine.isCommandConsoleOpen = !engine.isCommandConsoleOpen },
             )
             TopPillButton(
-                label = "💾 Export",
+                label = "📄",
                 enabled = true,
-                highlight = true,
+                onClick = { engine.isPdfManualOpen = true },
+            )
+            TopPillButton(
+                label = engine.exportProgress?.let { "⏳ $it%" } ?: "⬆ Export",
+                enabled = true,
+                highlight = engine.exportProgress != null,
                 onClick = onExportVideo,
             )
         }
@@ -294,6 +317,8 @@ private fun TopPillButton(
             color = fg,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
         )
     }
@@ -358,30 +383,15 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                     rotationZ = transform.rotationDegrees
                 },
         ) {
-            if (project.videoUri != null) {
-                AndroidView(
-                    factory = { ctx ->
-                        VideoView(ctx).apply {
-                            setVideoURI(Uri.parse(project.videoUri))
-                            setOnPreparedListener { mp ->
-                                mp.isLooping = true
-                                val dur = mp.duration.toLong()
-                                if (dur > 0 && dur != project.sourceDurationMs) {
-                                    engine.setVideoSource(project.videoUri, dur, project.title)
-                                }
-                            }
-                        }
-                    },
-                    update = { view ->
-                        if (engine.isPlaying && !view.isPlaying) {
-                            view.seekTo(engine.playheadMs.toInt())
-                            view.start()
-                        } else if (!engine.isPlaying && view.isPlaying) {
-                            view.pause()
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
+            val realUri = project.videoUri
+            if (realUri != null) {
+                key(realUri) {
+                    TrimAwareVideoPlayer(
+                        engine = engine,
+                        videoUri = realUri,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             } else {
                 ProceduralPreviewBackdrop(
                     playheadMs = engine.playheadMs,
@@ -765,16 +775,21 @@ private fun TimelineScrubberBar(engine: ProjectEngine) {
                 .height(22.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .background(Color(0xFF090C12))
-                .pointerInput(project.sourceDurationMs) {
+                .pointerInput(Unit) {
                     detectDragGestures { change, _ ->
                         change.consume()
+                        val p = engine.project
                         val frac = (change.position.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
-                        engine.playheadMs = (frac * project.sourceDurationMs).toLong()
+                        engine.playheadMs = (frac * p.sourceDurationMs).toLong().coerceIn(p.trimStartMs, p.trimEndMs)
                     }
                 }
-                .clickable {
-                    val mid = (project.trimStartMs + project.trimEndMs) / 2L
-                    engine.playheadMs = mid
+                .pointerInput(Unit) {
+                    // Tippen springt an die angetippte Stelle (vorher: immer in die Mitte)
+                    detectTapGestures { offset ->
+                        val p = engine.project
+                        val frac = (offset.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                        engine.playheadMs = p.resolvePlayablePosition((frac * p.sourceDurationMs).toLong())
+                    }
                 },
         ) {
             val total = project.sourceDurationMs.coerceAtLeast(1L).toFloat()
@@ -794,6 +809,16 @@ private fun TimelineScrubberBar(engine: ProjectEngine) {
                     size = Size((endX - startX).coerceAtLeast(4f), size.height - 4f),
                     cornerRadius = CornerRadius(6f, 6f),
                 )
+
+                // Weggeschnittene Bereiche (vor Trim-Start, nach Trim-Ende, herausgeschnittene Mittelstücke)
+                val cutShade = Color(0xFFFF2D55).copy(alpha = 0.28f)
+                if (startX > 0f) drawRect(cutShade, Offset(0f, 0f), Size(startX, size.height))
+                if (endX < size.width) drawRect(cutShade, Offset(endX, 0f), Size(size.width - endX, size.height))
+                project.removedRanges.forEach { r ->
+                    val rx = (r.startMs / total) * size.width
+                    val rw = ((r.endMs - r.startMs) / total) * size.width
+                    drawRect(cutShade, Offset(rx, 0f), Size(rw.coerceAtLeast(2f), size.height))
+                }
 
                 // Gelbe Trim-Klammern links & rechts
                 drawLine(Color(0xFFFFB300), Offset(startX, 0f), Offset(startX, size.height), strokeWidth = 4f)

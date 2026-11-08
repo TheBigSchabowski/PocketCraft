@@ -14,6 +14,7 @@ import com.example.pocketcraft.model.CropZoomState
 import com.example.pocketcraft.model.CustomFontEntry
 import com.example.pocketcraft.model.FilterConfig
 import com.example.pocketcraft.model.OverlayKind
+import com.example.pocketcraft.model.RemovedRange
 import com.example.pocketcraft.model.SubtitleSegment
 import com.example.pocketcraft.model.VideoFilterPreset
 import com.example.pocketcraft.model.VideoProject
@@ -86,6 +87,44 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     /** Statusmeldung für den letzten Export oder Auto-Caption-Lauf. */
     var statusBanner by mutableStateOf<String?>(null)
 
+    // =========================================================================
+    // Projekte (Speichern / Laden)
+    // =========================================================================
+
+    /** Persistenz-Speicher für Projekte (wird von der MainActivity gesetzt; in Tests optional). */
+    var projectStore: ProjectStore? = null
+        set(value) {
+            field = value
+            refreshProjectList()
+        }
+
+    /** ID des aktuell geöffneten (bereits mindestens einmal gespeicherten) Projekts. */
+    var currentProjectId by mutableStateOf<String?>(null)
+        private set
+
+    /** Projektzustand beim letzten Speichern/Laden (zum Erkennen ungespeicherter Änderungen). */
+    private var lastSavedProject by mutableStateOf<VideoProject?>(null)
+
+    /** Ob der Projekte-Dialog gerade offen ist. */
+    var isProjectsDialogOpen by mutableStateOf(false)
+
+    /** Liste aller gespeicherten Projekte (neueste zuerst). */
+    val savedProjects = mutableStateListOf<ProjectSummary>()
+
+    /** Callback für den Export (von der MainActivity gesetzt, damit auch der Befehl `export` funktioniert). */
+    var onExportRequested: (() -> Unit)? = null
+
+    /** Fortschritt eines laufenden Video-Exports (0–100) oder `null`, wenn gerade nicht exportiert wird. */
+    var exportProgress by mutableStateOf<Int?>(null)
+
+    val hasUnsavedChanges: Boolean
+        get() = lastSavedProject != project
+
+    /** Verschachtelungstiefe laufender Konsolenbefehle (dort wird nicht zusammengefasst). */
+    private var commandDepth = 0
+    private var lastCoalesceKey: String? = null
+    private var lastCoalesceAtMs = 0L
+
     private data class HistorySnapshot(
         val description: String,
         val state: VideoProject,
@@ -112,19 +151,212 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
      * Führt eine zustandsverändernde Operation auf dem Projekt aus und speichert den
      * vorherigen Zustand auf dem Undo-Stack.
      */
-    fun commitChange(description: String, transform: (VideoProject) -> VideoProject) {
-        val next = transform(project)
-        if (next == project) return
-        undoStack.add(HistorySnapshot(description = description, state = project))
-        if (undoStack.size > 80) {
-            undoStack.removeAt(0)
+    fun commitChange(
+        description: String,
+        coalesceKey: String? = null,
+        transform: (VideoProject) -> VideoProject,
+    ) {
+        var next = transform(project)
+        // Bei einem echten Video ist die Länge fest vorgegeben: PocketScript-Befehle dürfen die
+        // Timeline nicht über das Videoende hinaus "verlängern" (sonst läuft die Vorschau ins Leere).
+        if (next.videoUri != null && next.videoUri == project.videoUri && next.sourceDurationMs != project.sourceDurationMs) {
+            next = next.clampedToDuration(project.sourceDurationMs)
         }
+        if (next == project) return
+
+        // Schnelle Folge-Änderungen derselben Geste (Slider ziehen, Pinch-Zoom, Overlay ziehen)
+        // werden zu EINEM Undo-Schritt zusammengefasst, statt den Undo-Stack zu fluten.
+        val now = System.currentTimeMillis()
+        val coalesce = coalesceKey != null &&
+            commandDepth == 0 &&
+            coalesceKey == lastCoalesceKey &&
+            now - lastCoalesceAtMs < 900L &&
+            undoStack.isNotEmpty()
+        if (coalesce) {
+            val top = undoStack.removeAt(undoStack.lastIndex)
+            undoStack.add(top.copy(description = description))
+        } else {
+            undoStack.add(HistorySnapshot(description = description, state = project))
+            if (undoStack.size > 80) {
+                undoStack.removeAt(0)
+            }
+        }
+        lastCoalesceKey = if (commandDepth == 0) coalesceKey else null
+        lastCoalesceAtMs = now
         redoStack.clear()
         project = next
-        // Playhead innerhalb der neuen Schnittgrenzen halten
-        if (playheadMs < next.trimStartMs) playheadMs = next.trimStartMs
-        if (playheadMs > next.trimEndMs) playheadMs = next.trimEndMs
+        clampPlayhead()
     }
+
+    private fun clampPlayhead() {
+        if (playheadMs < project.trimStartMs) playheadMs = project.trimStartMs
+        if (playheadMs > project.trimEndMs) playheadMs = project.trimEndMs
+    }
+
+    /**
+     * Rückt die Demo-Vorschau um [deltaMs] weiter: springt über herausgeschnittene Bereiche
+     * und beginnt am Trim-Ende wieder beim Trim-Start.
+     */
+    fun advancePlayhead(deltaMs: Long) {
+        val p = project
+        var next = playheadMs + deltaMs
+        if (next < p.trimStartMs) next = p.trimStartMs
+        next = p.resolvePlayablePosition(next)
+        if (next >= p.trimEndMs) {
+            next = p.resolvePlayablePosition(p.trimStartMs)
+        }
+        playheadMs = next
+    }
+
+    /**
+     * Übernimmt die tatsächliche Länge des geladenen Videos (vom Player gemeldet),
+     * OHNE Schnitte, Untertitel usw. zurückzusetzen und ohne Undo-Eintrag.
+     */
+    fun syncRealVideoDuration(durationMs: Long) {
+        if (durationMs <= 0L || project.videoUri == null) return
+        if (durationMs == project.sourceDurationMs) return
+        val wasFullLength = project.trimEndMs >= project.sourceDurationMs - 200L
+        var synced = project.clampedToDuration(durationMs)
+        if (wasFullLength) synced = synced.copy(trimEndMs = durationMs)
+        val savedWasInSync = lastSavedProject == project
+        project = synced
+        if (savedWasInSync) lastSavedProject = synced
+        clampPlayhead()
+    }
+
+    /** Fügt einen herausgeschnittenen Bereich hinzu (überlappende Bereiche werden zusammengeführt). */
+    fun addRemovedRange(startMs: Long, endMs: Long): Boolean {
+        val s = minOf(startMs, endMs).coerceAtLeast(0L)
+        val e = maxOf(startMs, endMs).coerceAtMost(project.sourceDurationMs)
+        if (e - s < 100L) return false
+        commitChange("Bereich ${formatSec(s)}–${formatSec(e)} herausgeschnitten") { p ->
+            val merged = mutableListOf<RemovedRange>()
+            for (r in (p.removedRanges + RemovedRange(s, e)).sortedBy { it.startMs }) {
+                val last = merged.lastOrNull()
+                if (last != null && r.startMs <= last.endMs) {
+                    merged[merged.lastIndex] = last.copy(endMs = maxOf(last.endMs, r.endMs))
+                } else {
+                    merged.add(r)
+                }
+            }
+            p.copy(removedRanges = merged)
+        }
+        playheadMs = project.resolvePlayablePosition(playheadMs)
+        return true
+    }
+
+    // =========================================================================
+    // Projekte: Speichern, Laden, Neu, Löschen
+    // =========================================================================
+
+    fun refreshProjectList() {
+        val list = projectStore?.list().orEmpty()
+        savedProjects.clear()
+        savedProjects.addAll(list)
+    }
+
+    /** Speichert das aktuelle Projekt (legt beim ersten Mal ein neues Projekt an). */
+    fun saveCurrentProject(newTitle: String? = null): String {
+        val store = projectStore ?: return "Speichern nicht möglich (kein Projektspeicher verfügbar)."
+        val cleanTitle = newTitle?.trim()?.takeIf { it.isNotEmpty() }
+        if (cleanTitle != null && cleanTitle != project.title) {
+            commitChange("Projekt umbenannt in '$cleanTitle'") { it.copy(title = cleanTitle) }
+        }
+        val id = currentProjectId ?: newProjectId()
+        return try {
+            store.save(id, project)
+            currentProjectId = id
+            lastSavedProject = project
+            refreshProjectList()
+            "Projekt '${project.title}' gespeichert."
+        } catch (e: Exception) {
+            "Speichern fehlgeschlagen: ${e.message}"
+        }
+    }
+
+    /** Speichert das aktuelle Projekt als NEUES Projekt unter einem neuen Namen. */
+    fun saveProjectAs(title: String): String {
+        val clean = title.trim().ifEmpty { "${project.title} (Kopie)" }
+        currentProjectId = null
+        lastSavedProject = null
+        return saveCurrentProject(clean)
+    }
+
+    /** Speichert still im Hintergrund, falls es ungespeicherte Änderungen gibt. */
+    fun autosave() {
+        if (projectStore == null || !hasUnsavedChanges) return
+        // Unberührtes Demo-Projekt nicht als eigenes Projekt anlegen
+        if (currentProjectId == null && undoStack.isEmpty()) return
+        saveCurrentProject()
+    }
+
+    fun openProject(id: String): String {
+        val store = projectStore ?: return "Kein Projektspeicher verfügbar."
+        if (id == currentProjectId && !hasUnsavedChanges) {
+            return "Projekt '${project.title}' ist bereits geöffnet."
+        }
+        autosave()
+        val saved = store.load(id) ?: return "Projekt konnte nicht geladen werden."
+        replaceProject(saved.project)
+        currentProjectId = saved.id
+        lastSavedProject = saved.project
+        store.setLastOpened(saved.id)
+        refreshProjectList()
+        return "Projekt '${saved.project.title}' geöffnet."
+    }
+
+    /** Sucht ein Projekt per Name (Teilstring) oder Listennummer (1 = neuestes). */
+    fun findProject(query: String): ProjectSummary? {
+        refreshProjectList()
+        val q = query.trim().lowercase()
+        q.toIntOrNull()?.let { idx -> return savedProjects.getOrNull(idx - 1) }
+        return savedProjects.firstOrNull { it.title.lowercase() == q }
+            ?: savedProjects.firstOrNull { it.title.lowercase().contains(q) }
+    }
+
+    fun createNewProject(title: String? = null): String {
+        autosave()
+        val nextNumber = savedProjects.size + 1
+        val cleanTitle = title?.trim()?.takeIf { it.isNotEmpty() } ?: "Projekt $nextNumber"
+        replaceProject(VideoProject(title = cleanTitle, customFonts = project.customFonts))
+        currentProjectId = null
+        lastSavedProject = null
+        return "Neues Projekt '$cleanTitle' erstellt (wird beim Speichern angelegt)."
+    }
+
+    fun deleteProject(id: String): String {
+        val store = projectStore ?: return "Kein Projektspeicher verfügbar."
+        val title = savedProjects.firstOrNull { it.id == id }?.title ?: "Projekt"
+        store.delete(id)
+        if (id == currentProjectId) {
+            currentProjectId = null
+            lastSavedProject = null
+        }
+        refreshProjectList()
+        return "Projekt '$title' gelöscht."
+    }
+
+    /** Lädt beim App-Start das zuletzt geöffnete Projekt. */
+    fun restoreLastSession() {
+        val store = projectStore ?: return
+        val id = store.lastOpenedId() ?: return
+        val saved = store.load(id) ?: return
+        replaceProject(saved.project)
+        currentProjectId = saved.id
+        lastSavedProject = saved.project
+    }
+
+    private fun replaceProject(newProject: VideoProject) {
+        isPlaying = false
+        undoStack.clear()
+        redoStack.clear()
+        lastCoalesceKey = null
+        project = newProject
+        playheadMs = newProject.resolvePlayablePosition(newProject.trimStartMs)
+        selectedOverlayId = newProject.overlays.firstOrNull()?.id
+    }
+
+    private fun newProjectId(): String = "p_${System.currentTimeMillis()}"
 
     /**
      * Macht den letzten Bearbeitungsschritt rückgängig (`undo`).
@@ -136,6 +368,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val snapshot = undoStack.removeAt(undoStack.lastIndex)
         redoStack.add(HistorySnapshot(description = snapshot.description, state = project))
         project = snapshot.state
+        lastCoalesceKey = null
+        clampPlayhead()
         return "Rückgängig gemacht: ${snapshot.description}"
     }
 
@@ -149,6 +383,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val snapshot = redoStack.removeAt(redoStack.lastIndex)
         undoStack.add(HistorySnapshot(description = snapshot.description, state = project))
         project = snapshot.state
+        lastCoalesceKey = null
+        clampPlayhead()
         return "Wiederhergestellt: ${snapshot.description}"
     }
 
@@ -164,7 +400,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val clampedZoom = zoom.coerceIn(1.0f, 5.0f)
         val clampedPanX = panX.coerceIn(-1.0f, 1.0f)
         val clampedPanY = panY.coerceIn(-1.0f, 1.0f)
-        commitChange("Zoom ${(clampedZoom * 10).roundToInt() / 10f}x") { p ->
+        commitChange("Zoom ${(clampedZoom * 10).roundToInt() / 10f}x", coalesceKey = "zoom") { p ->
             p.copy(
                 transform = p.transform.copy(
                     zoom = clampedZoom,
@@ -180,7 +416,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val safeTop = top.coerceIn(0f, 0.98f)
         val safeRight = right.coerceIn((safeLeft + 0.02f).coerceAtMost(1.0f), 1.0f)
         val safeBottom = bottom.coerceIn((safeTop + 0.02f).coerceAtMost(1.0f), 1.0f)
-        commitChange("Bild kleiner geschnitten") { p ->
+        commitChange("Bild kleiner geschnitten", coalesceKey = "crop") { p ->
             p.copy(
                 transform = p.transform.copy(
                     cropLeft = safeLeft,
@@ -208,7 +444,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     fun setTrimRange(startMs: Long, endMs: Long) {
         val safeStart = startMs.coerceIn(0L, (project.sourceDurationMs - 500L).coerceAtLeast(0L))
         val safeEnd = endMs.coerceIn(safeStart + 500L, project.sourceDurationMs)
-        commitChange("Clip gekürzt (${formatSec(safeStart)} - ${formatSec(safeEnd)})") { p ->
+        commitChange("Clip gekürzt (${formatSec(safeStart)} - ${formatSec(safeEnd)})", coalesceKey = "trim") { p ->
             p.copy(trimStartMs = safeStart, trimEndMs = safeEnd)
         }
     }
@@ -245,7 +481,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         saturation: Float = project.filter.saturationMultiplier,
         vignette: Float = project.filter.vignetteStrength,
     ) {
-        commitChange("Farbkorrektur angepasst") { p ->
+        commitChange("Farbkorrektur angepasst", coalesceKey = "filteradj") { p ->
             p.copy(
                 filter = p.filter.copy(
                     intensity = intensity.coerceIn(0f, 1f),
@@ -266,7 +502,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         width: Float = project.blur.zoneWidth,
         height: Float = project.blur.zoneHeight,
     ) {
-        commitChange("Blur: ${mode.label}") { p ->
+        commitChange("Blur: ${mode.label}", coalesceKey = "blur") { p ->
             p.copy(
                 blur = BlurConfig(
                     mode = mode,
@@ -330,7 +566,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val target = project.overlays.firstOrNull { it.id == id } ?: return
         val clampedX = newXPercent.coerceIn(0.05f, 0.95f)
         val clampedY = newYPercent.coerceIn(0.05f, 0.95f)
-        commitChange("Overlay '${target.content}' verschoben") { p ->
+        commitChange("Overlay '${target.content}' verschoben", coalesceKey = "move:$id") { p ->
             p.copy(
                 overlays = p.overlays.map {
                     if (it.id == id) it.copy(xPercent = clampedX, yPercent = clampedY) else it
@@ -340,7 +576,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     }
 
     fun scaleOverlay(id: String, newScale: Float, newRotation: Float? = null) {
-        commitChange("Overlay skaliert") { p ->
+        commitChange("Overlay skaliert", coalesceKey = "scale:$id") { p ->
             p.copy(
                 overlays = p.overlays.map {
                     if (it.id == id) {
@@ -475,6 +711,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 sourceDurationMs = safeDuration,
                 trimStartMs = 0L,
                 trimEndMs = safeDuration,
+                cutMarkers = emptyList(),
+                removedRanges = emptyList(),
             )
         }
         playheadMs = 0L
@@ -490,6 +728,15 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
      * `trim 2 12`, `filter cyberpunk`, `blur bokeh 20`, `text Hallo Welt`, `emoji 🔥`, `autocaption`, `reset`.
      */
     fun executeCommand(rawInput: String): String {
+        commandDepth++
+        try {
+            return executeCommandInternal(rawInput)
+        } finally {
+            commandDepth--
+        }
+    }
+
+    private fun executeCommandInternal(rawInput: String): String {
         val trimmed = rawInput.trim()
         if (trimmed.isEmpty()) return ""
 
@@ -519,6 +766,72 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             "pdf", "manual", "anleitung", "handbuch" -> {
                 isPdfManualOpen = true
                 resultMessage = "PocketScript PDF-Anleitung geöffnet."
+            }
+
+            "save", "speichern", "sichern", "s" -> {
+                if (args.firstOrNull()?.lowercase() in listOf("as", "als", "unter")) {
+                    resultMessage = saveProjectAs(args.drop(1).joinToString(" "))
+                } else {
+                    resultMessage = saveCurrentProject(args.joinToString(" ").takeIf { it.isNotBlank() })
+                }
+                isError = resultMessage.startsWith("Speichern")
+            }
+
+            "saveas" -> {
+                resultMessage = saveProjectAs(args.joinToString(" "))
+            }
+
+            "projects", "projekte", "project", "projekt" -> {
+                refreshProjectList()
+                isProjectsDialogOpen = true
+                resultMessage = if (savedProjects.isEmpty()) {
+                    "Noch keine gespeicherten Projekte. Tippe 'save <Name>' zum Speichern."
+                } else {
+                    "Projekte: " + savedProjects.mapIndexed { i, s -> "${i + 1}. ${s.title}" }.joinToString(" · ")
+                }
+            }
+
+            "open", "load", "öffnen", "oeffnen", "laden" -> {
+                val query = args.joinToString(" ").trim()
+                if (query.isEmpty()) {
+                    refreshProjectList()
+                    isProjectsDialogOpen = true
+                    resultMessage = "Projekte-Liste geöffnet."
+                } else {
+                    val found = findProject(query)
+                    if (found == null) {
+                        isError = true
+                        resultMessage = "Kein Projekt '$query' gefunden. Tippe 'projects' für die Liste."
+                    } else {
+                        resultMessage = openProject(found.id)
+                    }
+                }
+            }
+
+            "new", "neu" -> {
+                resultMessage = createNewProject(args.joinToString(" "))
+            }
+
+            "rename", "umbenennen" -> {
+                val name = args.joinToString(" ").trim()
+                if (name.isEmpty()) {
+                    isError = true
+                    resultMessage = "Syntax: rename <Neuer Projektname>"
+                } else {
+                    commitChange("Projekt umbenannt in '$name'") { it.copy(title = name) }
+                    resultMessage = if (currentProjectId != null) saveCurrentProject() else "Projekt heißt jetzt '$name'."
+                }
+            }
+
+            "export" -> {
+                val exporter = onExportRequested
+                if (exporter == null) {
+                    isError = true
+                    resultMessage = "Export ist hier nicht verfügbar."
+                } else {
+                    exporter()
+                    resultMessage = if (exportProgress != null) "Video-Export läuft…" else (statusBanner ?: "Export gestartet…")
+                }
             }
 
             "undo", "u", "zurück", "zurueck" -> {
@@ -717,7 +1030,37 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 resultMessage = "Video auf ${project.transform.rotationDegrees.roundToInt()}° gedreht."
             }
 
-            "reset", "clear" -> {
+            "clear", "delete", "del", "remove", "lösche", "loesche", "entferne" -> {
+                val target = args.joinToString(" ").trim()
+                if (target.isEmpty() && verb == "clear") {
+                    commitChange("Projekt zurückgesetzt") {
+                        VideoProject(
+                            title = project.title,
+                            videoUri = project.videoUri,
+                            sourceDurationMs = project.sourceDurationMs,
+                            trimEndMs = project.sourceDurationMs,
+                            customFonts = project.customFonts,
+                        )
+                    }
+                    resultMessage = "Alle Effekte, Zoom und Schnitte auf Ausgangszustand zurückgesetzt."
+                } else {
+                    val (msg, err) = clearElements(target)
+                    resultMessage = msg
+                    isError = err
+                }
+            }
+
+            "captions", "subs", "list" -> {
+                val subs = project.subtitles.sortedBy { it.startMs }
+                resultMessage = if (subs.isEmpty()) {
+                    "Keine Untertitel vorhanden."
+                } else {
+                    subs.mapIndexed { i, sub -> "caption${i + 1}: \"${sub.text}\" (${formatSec(sub.startMs)}–${formatSec(sub.endMs)})" }
+                        .joinToString(" · ")
+                }
+            }
+
+            "reset" -> {
                 commitChange("Projekt zurückgesetzt") {
                     VideoProject(
                         title = project.title,
@@ -731,7 +1074,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             }
 
             "help", "?" -> {
-                resultMessage = "Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
+                resultMessage = "Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
             }
 
             else -> {
@@ -752,6 +1095,93 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     }
 
     /**
+     * Entfernt gezielt Elemente:
+     * - `clear all captions` / `clear captions` → alle Untertitel
+     * - `clear caption1` / `clear caption 2` → einzelner Untertitel (nach Startzeit nummeriert)
+     * - `clear caption Hallo` → alle Untertitel, die "Hallo" enthalten
+     * - analog `clear texts` / `clear text1`, `clear emojis` / `clear emoji2`, `clear overlays`
+     * - `clear cuts` → alle Schnittmarken & herausgeschnittenen Bereiche
+     * - `clear all` → alle Untertitel, Texte und Emojis
+     */
+    private fun clearElements(rawTarget: String): Pair<String, Boolean> {
+        val target = rawTarget.trim().lowercase().removeSuffix(".")
+        if (target == "all" || target == "alles" || target == "alle") {
+            if (project.subtitles.isEmpty() && project.overlays.isEmpty()) {
+                return "Keine Untertitel, Texte oder Emojis vorhanden." to false
+            }
+            val n = project.subtitles.size + project.overlays.size
+            commitChange("Alle Untertitel, Texte & Emojis gelöscht") { it.copy(subtitles = emptyList(), overlays = emptyList()) }
+            selectedOverlayId = null
+            return "$n Elemente gelöscht (alle Untertitel, Texte & Emojis)." to false
+        }
+
+        val m = Regex(
+            """^(?:(?:all|alle)\s+(?:the\s+|die\s+)?)?(captions?|subs?|subtitles?|untertitel|texts?|titles?|titel|texte|emojis?|stickers?|overlays?|cuts?|schnitte?|cutmarker)\s*(.*)$""",
+        ).matchEntire(target) ?: return "Was soll gelöscht werden? z.B. 'clear all captions', 'clear caption1', 'clear texts', 'clear emoji1', 'clear cuts'." to true
+
+        val kindToken = m.groupValues[1]
+        val rest = m.groupValues[2].trim()
+        val isAll = rest.isEmpty() || rest == "all" || rest == "alle"
+        val index = rest.toIntOrNull()
+
+        when {
+            kindToken.startsWith("cut") || kindToken.startsWith("schnitt") -> {
+                if (project.cutMarkers.isEmpty() && project.removedRanges.isEmpty()) return "Keine Schnittmarken vorhanden." to false
+                commitChange("Schnittmarken & herausgeschnittene Bereiche gelöscht") { it.copy(cutMarkers = emptyList(), removedRanges = emptyList()) }
+                return "Alle Schnittmarken und herausgeschnittenen Bereiche entfernt (Trim-Anfang/-Ende bleiben – 'undo' oder Kürzen-Tab zum Ändern)." to false
+            }
+
+            kindToken.startsWith("cap") || kindToken.startsWith("sub") || kindToken == "untertitel" -> {
+                val sorted = project.subtitles.sortedBy { it.startMs }
+                if (sorted.isEmpty()) return "Keine Untertitel vorhanden." to false
+                val toRemove = when {
+                    isAll -> sorted
+                    index != null -> listOfNotNull(sorted.getOrNull(index - 1))
+                    else -> sorted.filter { it.text.lowercase().contains(rest) }
+                }
+                if (toRemove.isEmpty()) {
+                    return (if (index != null) "caption$index gibt es nicht (es gibt ${sorted.size} Untertitel)." else "Kein Untertitel mit '$rest' gefunden.") to true
+                }
+                val ids = toRemove.map { it.id }.toSet()
+                commitChange(if (isAll) "Alle Untertitel gelöscht" else "${toRemove.size} Untertitel gelöscht") { p ->
+                    p.copy(subtitles = p.subtitles.filterNot { it.id in ids })
+                }
+                return when {
+                    isAll -> "Alle ${toRemove.size} Untertitel gelöscht."
+                    index != null -> "caption$index (\"${toRemove.first().text}\") gelöscht."
+                    else -> "${toRemove.size} Untertitel mit '$rest' gelöscht."
+                } to false
+            }
+
+            else -> {
+                val kinds: Set<OverlayKind> = when {
+                    kindToken.startsWith("emoji") || kindToken.startsWith("sticker") -> setOf(OverlayKind.EMOJI)
+                    kindToken.startsWith("overlay") -> setOf(OverlayKind.TEXT, OverlayKind.EMOJI)
+                    else -> setOf(OverlayKind.TEXT)
+                }
+                val label = when (kinds.size) {
+                    2 -> "Overlays"
+                    else -> if (OverlayKind.EMOJI in kinds) "Emojis" else "Texte"
+                }
+                val sorted = project.overlays.filter { it.kind in kinds }.sortedBy { it.startMs }
+                if (sorted.isEmpty()) return "Keine $label vorhanden." to false
+                val toRemove = when {
+                    isAll -> sorted
+                    index != null -> listOfNotNull(sorted.getOrNull(index - 1))
+                    else -> sorted.filter { it.content.lowercase().contains(rest) }
+                }
+                if (toRemove.isEmpty()) {
+                    return (if (index != null) "${kindToken.trimEnd('s')}$index gibt es nicht (es gibt ${sorted.size} $label)." else "Kein Element mit '$rest' gefunden.") to true
+                }
+                val ids = toRemove.map { it.id }.toSet()
+                commitChange("${toRemove.size} $label gelöscht") { p -> p.copy(overlays = p.overlays.filterNot { it.id in ids }) }
+                if (selectedOverlayId in ids) selectedOverlayId = project.overlays.firstOrNull()?.id
+                return (if (toRemove.size == 1) "'${toRemove.first().content}' gelöscht." else "${toRemove.size} $label gelöscht.") to false
+            }
+        }
+    }
+
+    /**
      * Berechnet das zum aktuellen [playheadMs] gültige Seitenverhältnis:
      * Falls ein zeitgebundener PocketScript-Span (wie `10-24,3 (8:15) 9 (16:18)`) aktiv ist,
      * hat dessen Format Vorrang; andernfalls gilt `project.aspectRatio`.
@@ -766,38 +1196,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
      * Kombiniert den globalen `project.transform` mit etwaigen zeitgebundenen Kanten-Zuschnitten
      * (`u20%`, `o20%`, `r20%`, `l20%`, `90 u90%`) aus `timedFormatSpans`.
      */
-    fun currentTransform(atMs: Long = playheadMs): CropZoomState {
-        var current = project.transform
-        val activeSpans = project.timedFormatSpans.filter { atMs in it.startMs..it.endMs }
-        for (span in activeSpans) {
-            var left = span.cropLeft ?: current.cropLeft
-            var top = span.cropTop ?: current.cropTop
-            var right = span.cropRight ?: current.cropRight
-            var bottom = span.cropBottom ?: current.cropBottom
-            if (span.cropBottom != null && top >= bottom - 0.02f) {
-                top = 0.0f
-            }
-            if (span.cropTop != null && bottom <= top + 0.02f) {
-                bottom = 1.0f
-            }
-            if (span.cropRight != null && left >= right - 0.02f) {
-                left = 0.0f
-            }
-            if (span.cropLeft != null && right <= left + 0.02f) {
-                right = 1.0f
-            }
-            current = current.copy(
-                cropLeft = left.coerceIn(0f, 0.98f),
-                cropTop = top.coerceIn(0f, 0.98f),
-                cropRight = right.coerceIn((left + 0.02f).coerceAtMost(1f), 1f),
-                cropBottom = bottom.coerceIn((top + 0.02f).coerceAtMost(1f), 1f),
-                panX = (span.panX ?: current.panX).coerceIn(-1f, 1f),
-                panY = (span.panY ?: current.panY).coerceIn(-1f, 1f),
-                zoom = span.zoom ?: current.zoom,
-            )
-        }
-        return current
-    }
+    fun currentTransform(atMs: Long = playheadMs): CropZoomState = project.transformAt(atMs)
 
     fun currentFormatLabel(atMs: Long = playheadMs): String {
         val activeSpan = project.timedFormatSpans.lastOrNull { atMs in it.startMs..it.endMs && it.hasCustomRatio }
@@ -807,6 +1206,21 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     }
 
     companion object {
+        /** Stellt sicher, dass alle Zeitwerte innerhalb der Videolänge [durationMs] liegen. */
+        internal fun VideoProject.clampedToDuration(durationMs: Long): VideoProject {
+            val d = durationMs.coerceAtLeast(500L)
+            val start = trimStartMs.coerceIn(0L, (d - 500L).coerceAtLeast(0L))
+            val end = trimEndMs.coerceIn((start + 500L).coerceAtMost(d), d)
+            return copy(
+                sourceDurationMs = d,
+                trimStartMs = start,
+                trimEndMs = end,
+                removedRanges = removedRanges
+                    .map { it.copy(startMs = it.startMs.coerceIn(0L, d), endMs = it.endMs.coerceIn(0L, d)) }
+                    .filter { it.endMs > it.startMs },
+            )
+        }
+
         fun formatSec(ms: Long): String {
             val totalTenths = (ms / 100L).coerceAtLeast(0L)
             val secs = totalTenths / 10
