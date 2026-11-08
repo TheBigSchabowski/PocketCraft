@@ -315,14 +315,17 @@ object VideoExporter {
     private fun publishToGallery(context: Context, tempFile: File, title: String): Outcome {
         val safeTitle = title.substringBeforeLast(".mp4").replace(Regex("[^a-zA-Z0-9äöüÄÖÜß _-]"), "_").trim().ifEmpty { "PocketCraft" }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.GERMANY).format(Date())
-        val fileName = "${safeTitle}_$stamp.mp4"
+        val fileName = "PocketCraft_${safeTitle}_$stamp.mp4"
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val resolver = context.contentResolver
                 val values = ContentValues().apply {
                     put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
                     put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/PocketCraft")
+                    // DCIM/Camera: erscheint in Google Fotos direkt oben in der Hauptansicht
+                    // (eigene Ordner wie Movies/PocketCraft zeigt Fotos nur versteckt unter "Auf dem Gerät").
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/Camera")
+                    put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis())
                     put(MediaStore.Video.Media.IS_PENDING, 1)
                 }
                 val uri = resolver.insert(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
@@ -332,7 +335,7 @@ object VideoExporter {
                 values.put(MediaStore.Video.Media.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
                 tempFile.delete()
-                Outcome.Success("Movies/PocketCraft/$fileName", uri)
+                Outcome.Success("DCIM/Camera/$fileName", uri)
             } else {
                 val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "PocketCraft").apply { mkdirs() }
                 val target = File(dir, fileName)

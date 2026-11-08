@@ -111,9 +111,16 @@ class MainActivity : ComponentActivity() {
                     } finally {
                         sharedEngine.exportProgress = null
                     }
-                    sharedEngine.statusBanner = when (outcome) {
-                        is VideoExporter.Outcome.Success -> "✓ Video gespeichert: ${outcome.displayPath} (in der Galerie / Google Fotos)"
-                        is VideoExporter.Outcome.Failure -> outcome.message
+                    when (outcome) {
+                        is VideoExporter.Outcome.Success -> {
+                            sharedEngine.statusBanner = "✓ Video in Google Fotos gespeichert (${outcome.displayPath})"
+                            outcome.uri?.let { uri ->
+                                sharedEngine.bannerAction = ProjectEngine.BannerAction("▶ In Fotos ansehen") {
+                                    openExportedVideo(uri)
+                                }
+                            }
+                        }
+                        is VideoExporter.Outcome.Failure -> sharedEngine.statusBanner = outcome.message
                     }
                 }
             }
@@ -130,6 +137,24 @@ class MainActivity : ComponentActivity() {
                 },
                 onExportVideo = exportAction,
             )
+        }
+    }
+
+    /** Öffnet das exportierte Video bevorzugt in Google Fotos (sonst im Standard-Player). */
+    private fun openExportedVideo(uri: Uri) {
+        val view = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/mp4")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val photos = Intent(view).setPackage("com.google.android.apps.photos")
+        try {
+            startActivity(photos)
+        } catch (_: Exception) {
+            try {
+                startActivity(view)
+            } catch (_: Exception) {
+                sharedEngine.statusBanner = "Keine App zum Abspielen gefunden. Das Video liegt in DCIM/Camera."
+            }
         }
     }
 

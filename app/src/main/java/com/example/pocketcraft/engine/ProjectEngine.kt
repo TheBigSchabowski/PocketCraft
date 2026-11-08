@@ -84,8 +84,19 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     /** Status-Indikator für die On-Device Auto-Caption Spracherkennung (Pixel 9 SpeechRecognizer). */
     var isListeningForCaptions by mutableStateOf(false)
 
-    /** Statusmeldung für den letzten Export oder Auto-Caption-Lauf. */
-    var statusBanner by mutableStateOf<String?>(null)
+    /** Statusmeldung für den letzten Export oder Auto-Caption-Lauf. Eine neue Meldung entfernt den Banner-Knopf. */
+    private var statusBannerState by mutableStateOf<String?>(null)
+    var statusBanner: String?
+        get() = statusBannerState
+        set(value) {
+            statusBannerState = value
+            bannerAction = null
+        }
+
+    /** Optionaler Knopf im Status-Banner (z.B. "▶ In Fotos ansehen" nach dem Export). */
+    data class BannerAction(val label: String, val onClick: () -> Unit)
+
+    var bannerAction by mutableStateOf<BannerAction?>(null)
 
     // =========================================================================
     // Projekte (Speichern / Laden)

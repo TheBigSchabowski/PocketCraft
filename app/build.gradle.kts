@@ -21,7 +21,7 @@ android {
         applicationId = "com.example.pocketcraft"
         minSdk = 27
         targetSdk = 36
-        versionCode = 3
+        versionCode = 4
         versionName = libs.versions.app.get()
     }
 

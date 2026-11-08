@@ -171,6 +171,25 @@ fun VideoStageArea(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
+                    engine.bannerAction?.let { action ->
+                        Surface(
+                            color = Color(0xFF00E5FF),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .clickable { action.onClick() },
+                        ) {
+                            Text(
+                                text = action.label,
+                                color = Color(0xFF04080E),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                            )
+                        }
+                    }
                     Text(
                         text = "✕",
                         color = Color(0xFF80DEEA),
