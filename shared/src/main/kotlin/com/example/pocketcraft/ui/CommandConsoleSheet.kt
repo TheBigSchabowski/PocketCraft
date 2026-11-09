@@ -1,8 +1,5 @@
 package com.example.pocketcraft.ui
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -36,7 +33,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -48,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.pocketcraft.engine.PocketScriptPdfManualGenerator
 import com.example.pocketcraft.engine.ProjectEngine
+import com.example.pocketcraft.platform.LocalPlatformHooks
 
 /**
  * Mehrzeiliges **PocketScript Code-Fenster** für das untere 1/3 (bzw. rechte 1/4 im Querformat).
@@ -65,7 +62,7 @@ fun PocketScriptCodePanel(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
+    val platform = LocalPlatformHooks.current
     val lineCount = remember(engine.scriptEditorText) {
         engine.scriptEditorText.lines().size.coerceAtLeast(1)
     }
@@ -123,8 +120,7 @@ fun PocketScriptCodePanel(
                     color = Color(0xFF1E293B),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.clickable {
-                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                        val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                        val clipText = platform.readClipboardText()?.trim()
                         if (!clipText.isNullOrEmpty()) {
                             engine.scriptEditorText = if (engine.scriptEditorText.isBlank()) {
                                 clipText
@@ -272,14 +268,13 @@ fun PocketScriptPdfManualDialog(
     engine: ProjectEngine,
     onClose: () -> Unit,
 ) {
-    val context = LocalContext.current
+    val platform = LocalPlatformHooks.current
     var savedPdfPath by remember { mutableStateOf<String?>(null) }
     var lastCopiedCommand by remember { mutableStateOf<String?>(null) }
 
     fun copyCommandToClipboard(rawCode: String) {
         val cleanCmd = PocketScriptPdfManualGenerator.extractCopyableCommand(rawCode)
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        cm?.setPrimaryClip(ClipData.newPlainText("PocketScript", cleanCmd))
+        platform.copyToClipboard(cleanCmd)
         lastCopiedCommand = cleanCmd
         engine.statusBanner = "In Zwischenablage kopiert: $cleanCmd"
     }
@@ -324,9 +319,13 @@ fun PocketScriptPdfManualDialog(
                         color = Color(0xFFFFB300),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.clickable {
-                            val pdfFile = PocketScriptPdfManualGenerator.generatePdfFile(context)
-                            savedPdfPath = pdfFile.absolutePath
-                            engine.statusBanner = "PDF gespeichert: ${pdfFile.name}"
+                            try {
+                                val pdfFile = platform.saveManualPdf()
+                                savedPdfPath = pdfFile.absolutePath
+                                engine.statusBanner = "PDF gespeichert: ${pdfFile.name}"
+                            } catch (e: Exception) {
+                                engine.statusBanner = "PDF konnte nicht gespeichert werden: ${e.message}"
+                            }
                         },
                     ) {
                         Text(

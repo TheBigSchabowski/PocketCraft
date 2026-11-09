@@ -1,8 +1,8 @@
 package com.example.pocketcraft.ui
 
-import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -14,11 +14,13 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import com.example.pocketcraft.engine.ProjectEngine
+import com.example.pocketcraft.platform.LocalPlatformHooks
+import com.example.pocketcraft.platform.PlatformHooks
 
 private val PocketCraftDarkPalette = darkColorScheme(
     primary = Color(0xFF00E5FF),
@@ -45,27 +47,27 @@ private val PocketCraftDarkPalette = darkColorScheme(
 @Composable
 fun PocketCraftApp(
     engine: ProjectEngine,
+    platform: PlatformHooks,
     onPickVideo: () -> Unit = {},
     onPickCustomFont: () -> Unit = {},
     onExportVideo: () -> Unit = {},
 ) {
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE ||
-        configuration.screenWidthDp > configuration.screenHeightDp
-
     // Automatisches Speichern ein paar Sekunden nach der letzten Änderung
     LaunchedEffect(engine.project) {
         kotlinx.coroutines.delay(4_000L)
         engine.autosave()
     }
 
+    CompositionLocalProvider(LocalPlatformHooks provides platform) {
     MaterialTheme(colorScheme = PocketCraftDarkPalette) {
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color(0xFF090B10))
                 .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
+            // Breiter als hoch (Handy quer, Desktop-Fenster) -> Werkzeuge rechts statt unten
+            val isLandscape = maxWidth > maxHeight
             if (isLandscape) {
                 // Querformat: Links 3/4 Video-Bühne, Rechts 1/4 Funktions-Menü (inkl. Inline-Befehlszeile)
                 Row(modifier = Modifier.fillMaxSize()) {
@@ -123,5 +125,6 @@ fun PocketCraftApp(
                 )
             }
         }
+    }
     }
 }

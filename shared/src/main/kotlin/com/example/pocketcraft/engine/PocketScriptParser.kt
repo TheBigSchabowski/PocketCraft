@@ -1,14 +1,5 @@
 package com.example.pocketcraft.engine
 
-import android.content.Context
-import android.content.Intent
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
-import android.graphics.Typeface
-import android.graphics.pdf.PdfDocument
-import androidx.core.content.FileProvider
 import com.example.pocketcraft.model.AspectRatioPreset
 import com.example.pocketcraft.model.BlurConfig
 import com.example.pocketcraft.model.BlurMode
@@ -19,7 +10,6 @@ import com.example.pocketcraft.model.OverlayKind
 import com.example.pocketcraft.model.SubtitleSegment
 import com.example.pocketcraft.model.TimedFormatSpan
 import com.example.pocketcraft.model.VideoFilterPreset
-import java.io.File
 import kotlin.math.roundToInt
 
 /**
@@ -94,6 +84,32 @@ object PocketScriptParser {
         pattern = """^(if|wenn|while|solange)\s+((?:\([^)]*\)|[^:])+?)\s*:\s*(.+)$""",
         option = RegexOption.IGNORE_CASE,
     )
+
+    // Zeitintervall-Schleife: `while 0-12 step 4: ...` oder `while step 3: ...`
+    private val stepLoopRegex = Regex(
+        pattern = """^(?:(all|\d+(?:[.,]\d+)?(?:\s*-\s*\d+(?:[.,]\d+)?)?)\s+)?(?:step|every|alle|schritt)\s+(\d+(?:[.,]\d+)?)s?$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    private val legacyConditionWords = setOf(
+        "caption", "sub", "untertitel", "text", "title", "titel", "emoji", "sticker", "filter", "fx", "blur",
+    )
+
+    /** `if caption red: u20%` / `while 0-12 step 4: …` – eine einzeilige Regel der klassischen Form. */
+    fun isLegacyRuleLine(line: String): Boolean = ifWhileRegex.matches(line)
+
+    /**
+     * Klassische Bedingung, die sich auf Inhalte im Video bezieht (`caption red`, `text cyan`,
+     * `filter cyberpunk`, `blur`, `(9:16)`, `0-12 step 4`) – im Unterschied zu einem Vergleich
+     * wie `$i > 3` oder `captions == 0`, den der [PocketScriptInterpreter] ausrechnet.
+     */
+    fun isLegacyCondition(condition: String): Boolean {
+        val cond = condition.trim()
+        if (stepLoopRegex.matches(cond) || ratioTokenRegex.matches(cond.replace(" ", ""))) return true
+        val first = cond.substringBefore(' ').lowercase()
+        if (first !in legacyConditionWords) return false
+        return !Regex("""[=<>!+*/%]""").containsMatchIn(cond.substringAfter(' ', ""))
+    }
 
     // Regex für `set cut 00:48`, `set cut1 00:48`, `cut at 00:48`, `cut 00:48`, `set cut: 00:48`
     private val cutMarkerRegex = Regex(
@@ -186,23 +202,8 @@ object PocketScriptParser {
             }
         }
 
-        // Mehrzeilige Programme (durch Zeilenumbruch `\n` oder `;` getrennt) Zeile für Zeile ausführen.
-        // Falls eine `if`/`while`-Zeile vor einer `set caption:`-Zeile steht, werden erst die
-        // Setup-Zeilen und direkt danach die `if`/`while`-Regeln ausgewertet.
-        if (input.contains("\n") || input.contains(";")) {
-            val lines = input.split(Regex("[\r\n;]+"))
-                .map { it.trim().replace(Regex("""^\d+\.\s+"""), "") }
-                .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
-            if (lines.isEmpty()) return "Keine ausführbaren Zeilen."
-            if (lines.size > 1) {
-                val (condLines, normalLines) = lines.partition { ifWhileRegex.matches(it) }
-                val ordered = normalLines + condLines
-                val results = ordered.map { line -> engine.executeCommand(line) }
-                return "${lines.size} Zeilen ausgeführt: " + results.joinToString(" · ")
-            } else {
-                return engine.executeCommand(lines.first())
-            }
-        }
+        // Programme: mehrere Zeilen (Zeilenumbruch oder `;`), Variablen, Schleifen, Funktionen, Blöcke.
+        PocketScriptInterpreter.tryRun(input, engine)?.let { return it }
 
         // 0. Prüfen auf `if <Bedingung>: <Befehl>` oder `while <Bedingung>: <Befehl>`
         //    z.B. `if caption red: u20%`, `if caption red: (9:16)`, `while caption red: u20%`
@@ -305,10 +306,6 @@ object PocketScriptParser {
         val labelPrefix = if (keyword.startsWith("w") && keyword != "wenn") "While" else "If"
 
         // A) Zeitintervall-Schleife: `while 0-12 step 4: ...` oder `while step 3: ...`
-        val stepLoopRegex = Regex(
-            pattern = """^(?:(all|\d+(?:[.,]\d+)?(?:\s*-\s*\d+(?:[.,]\d+)?)?)\s+)?(?:step|every|alle|schritt)\s+(\d+(?:[.,]\d+)?)s?$""",
-            option = RegexOption.IGNORE_CASE,
-        )
         val stepMatch = stepLoopRegex.matchEntire(cond)
         if (stepMatch != null) {
             val rangeTok = stepMatch.groupValues[1].ifBlank { "all" }
@@ -1308,9 +1305,9 @@ object PocketScriptParser {
 }
 
 /**
- * Erzeugt die offizielle **PocketScript PDF-Anleitung** (`PocketScript_Anleitung.pdf`)
- * nativ mit Androids [PdfDocument]-API, speichert sie auf dem Gerät und bietet sie zum
- * direkten Ansehen in der App sowie zum Öffnen in externen PDF-Readern an.
+ * Inhalt der offiziellen **PocketScript-Anleitung** (`PocketScript_Anleitung.pdf`).
+ * Die Abschnitte werden in der App angezeigt (Antippen kopiert den Befehl) und von jeder
+ * Plattform als echte PDF-Datei geschrieben.
  */
 object PocketScriptPdfManualGenerator {
 
@@ -1395,6 +1392,38 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
+            title = "3a. Variablen & Rechnen (let, \$name, {Rechnung})",
+            codeExamples = listOf(
+                "let x = 2,5" to "Legt die Variable x an. Sie bleibt erhalten, bis du sie änderst (vars zeigt alle).",
+                "zoom \$x" to "Setzt den Wert von x in den Befehl ein – hier also zoom 2,5.",
+                "let ende = \$x * 2 + 1" to "Rechnen mit + - * / % und Klammern, auch min(), max(), round(), random().",
+                "0-{\$x + 3} set caption: Start.gold" to "Geschweifte Klammern rechnen direkt im Befehl: 0 bis 5,5 Sekunden.",
+                "x += 1" to "Ändert eine Variable (auch -=, *=, /=).",
+                "print Video dauert \$duration s, \$captions Untertitel" to "Eingebaute Werte: \$duration, \$trimstart, \$trimend, \$playhead, \$zoom, \$captions, \$texts, \$emojis.",
+            ),
+        ),
+        ManualSection(
+            title = "3b. Schleifen & Bedingungen mit Blöcken (for, repeat, if … else … end)",
+            codeExamples = listOf(
+                "for t in 0..12 step 4: \$t-{\$t + 2} set emoji: 🔥" to "Zählschleife: t läuft 0, 4, 8, 12 – jeweils 2 Sekunden lang ein Emoji.",
+                "for c in captions: \$c_start-\$c_end u15%" to "Läuft über alle Untertitel (\$c_start, \$c_end, \$c_text) – auch texts, emojis, cuts.",
+                "for farbe in [red, gold, cyan]: text Hallo.\$farbe" to "Schleife über eine eigene Liste.",
+                "repeat 3: rotate 90" to "Wiederholt einen Befehl dreimal.",
+                "if \$duration > 30: delete after 00:30" to "Bedingung mit Vergleich (== != < <= > >=, and, or, not).",
+                "if \$captions == 0; autocaption; else; print Schon \$captions da; end" to "Block-Form mit else – im Code-Fenster eine Zeile pro Befehl statt ';'.",
+            ),
+        ),
+        ManualSection(
+            title = "3c. Eigene Funktionen (def)",
+            codeExamples = listOf(
+                "def titel(text, farbe): 0-3 set text: \$text.\$farbe.big.top" to "Definiert einen eigenen Befehl mit Parametern.",
+                "titel(Mein Urlaub, gold)" to "Ruft ihn auf – beliebig oft, mit anderen Werten.",
+                "def haelfte(x) = \$x / 2" to "Rechen-Funktion: liefert einen Wert zurück.",
+                "zoom {haelfte(5)}" to "… und lässt sich in jeder Rechnung verwenden (zoom 2,5).",
+                "def intro(); all (9:16); 0-2 set caption: Los gehts!.yellow; end" to "Mehrere Befehle als Block bis end.",
+            ),
+        ),
+        ManualSection(
             title = "4. Grundprinzip: Zeitbereiche & Kommazahlen",
             codeExamples = listOf(
                 "10-24,3" to "Von Sekunde 10,0 bis Sekunde 24,3 schneiden (Komma oder Punkt erlaubt).",
@@ -1433,89 +1462,4 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
     )
-
-    /**
-     * Generiert eine echte mehrseitige A4 PDF-Datei im App-Speicher (`PocketScript_Anleitung.pdf`).
-     */
-    fun generatePdfFile(context: Context): File {
-        val doc = PdfDocument()
-        var pageNum = 1
-        var page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNum).create())
-        var canvas: Canvas = page.canvas
-
-        // Dunkler Studio-Header + heller Lesebereich
-        val bgPaint = Paint().apply { color = Color.parseColor("#0F172A") }
-        canvas.drawRect(0f, 0f, 595f, 105f, bgPaint)
-
-        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#00E5FF")
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textSize = 20f
-        }
-        canvas.drawText("POCKETCRAFT — POCKETSCRIPT ANLEITUNG", 32f, 46f, titlePaint)
-
-        val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#E2E8F0")
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-            textSize = 11f
-        }
-        canvas.drawText("Kompakte Videoschnitt-Sprache für das 2-Sekunden-Code-Fenster auf dem Pixel 9", 32f, 70f, subPaint)
-        canvas.drawText("Beispiele:  all u20%  |  90 u90%  |  10-24,3 (8:15)  |  8-10 set caption: Pinker Honig.red", 32f, 88f, subPaint)
-
-        val sectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A")
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            textSize = 13f
-        }
-        val codeBoxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#F1F5F9")
-        }
-        val codeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0369A1")
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textSize = 10.5f
-        }
-        val descTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#334155")
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-            textSize = 10f
-        }
-
-        var y = 128f
-        for (sec in sections) {
-            if (y + 60f > 805f) {
-                doc.finishPage(page)
-                pageNum++
-                page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNum).create())
-                canvas = page.canvas
-                y = 48f
-            }
-            canvas.drawText(sec.title, 32f, y, sectionPaint)
-            y += 10f
-            for ((code, desc) in sec.codeExamples) {
-                if (y + 38f > 810f) {
-                    doc.finishPage(page)
-                    pageNum++
-                    page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNum).create())
-                    canvas = page.canvas
-                    y = 48f
-                }
-                canvas.drawRoundRect(RectF(32f, y, 563f, y + 32f), 6f, 6f, codeBoxPaint)
-                canvas.drawText(code, 40f, y + 13f, codeTextPaint)
-                canvas.drawText(desc, 40f, y + 26f, descTextPaint)
-                y += 37f
-            }
-            y += 10f
-        }
-
-        doc.finishPage(page)
-
-        val outDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "Manual").apply { mkdirs() }
-        val pdfFile = File(outDir, "PocketScript_Anleitung.pdf")
-        pdfFile.outputStream().use { out ->
-            doc.writeTo(out)
-        }
-        doc.close()
-        return pdfFile
-    }
 }

@@ -78,6 +78,9 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     /** Ob die PDF-Anleitung für PocketScript gerade als Vorschau-Dialog geöffnet ist. */
     var isPdfManualOpen by mutableStateOf(false)
 
+    /** Variablen und Funktionen aus PocketScript (`let x = 3`, `def …`) – gelten bis zum App-Ende. */
+    val scriptEnv = ScriptEnvironment()
+
     /** Aktuell ausgewähltes Overlay auf dem Canvas (zum Verschieben/Bearbeiten). */
     var selectedOverlayId by mutableStateOf<String?>(initialProject.overlays.firstOrNull()?.id)
 
@@ -760,7 +763,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 CommandLogEntry(
                     command = trimmed,
                     response = scriptResult,
-                    isError = false,
+                    isError = scriptResult.startsWith("⚠"),
                 ),
             )
             return scriptResult
@@ -1085,7 +1088,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             }
 
             "help", "?" -> {
-                resultMessage = "Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
+                resultMessage = "Programmieren: let x = 5, zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
             }
 
             else -> {

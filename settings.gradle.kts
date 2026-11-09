@@ -23,4 +23,15 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "PocketCraft"
-include(":app")
+// Desktop-App (macOS / Linux)
+include(":desktop")
+
+// Android-App nur, wenn ein Android SDK vorhanden ist – so baut ein reiner Linux-Server die Desktop-Pakete.
+val hasAndroidSdk = System.getenv("ANDROID_HOME") != null ||
+    System.getenv("ANDROID_SDK_ROOT") != null ||
+    file("local.properties").let { it.exists() && it.readText().lineSequence().any { l -> l.startsWith("sdk.dir=") } }
+if (hasAndroidSdk) {
+    include(":app")
+} else {
+    println("Kein Android SDK gefunden – :app wird übersprungen, nur :desktop wird gebaut.")
+}

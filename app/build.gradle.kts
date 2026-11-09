@@ -21,7 +21,7 @@ android {
         applicationId = "com.example.pocketcraft"
         minSdk = 27
         targetSdk = 36
-        versionCode = 4
+        versionCode = 5
         versionName = libs.versions.app.get()
     }
 
@@ -30,6 +30,9 @@ android {
     }
 
     testOptions.unitTests.isIncludeAndroidResources = true
+
+    // Gemeinsamer Code (Engine, PocketScript, Oberfläche) – derselbe Ordner wird auch von :desktop kompiliert
+    sourceSets["main"].kotlin.srcDir("../shared/src/main/kotlin")
 }
 
 dependencies {

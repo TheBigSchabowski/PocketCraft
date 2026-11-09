@@ -45,14 +45,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.pocketcraft.engine.EditorToolTab
-import com.example.pocketcraft.engine.PixelAutoCaptioner
 import com.example.pocketcraft.engine.ProjectEngine
 import com.example.pocketcraft.model.AspectRatioPreset
 import com.example.pocketcraft.model.BlurMode
@@ -60,6 +58,7 @@ import com.example.pocketcraft.model.BuiltInFont
 import com.example.pocketcraft.model.EmojiCatalog
 import com.example.pocketcraft.model.OverlayKind
 import com.example.pocketcraft.model.VideoFilterPreset
+import com.example.pocketcraft.platform.LocalPlatformHooks
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -430,7 +429,7 @@ private fun TrimAndCutToolView(engine: ProjectEngine) {
 // ============================================================================
 @Composable
 private fun CaptionsAndAutoSpeechToolView(engine: ProjectEngine) {
-    val context = LocalContext.current
+    val platform = LocalPlatformHooks.current
     var draftCaption by remember { mutableStateOf("") }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -442,7 +441,7 @@ private fun CaptionsAndAutoSpeechToolView(engine: ProjectEngine) {
         ) {
             Button(
                 onClick = {
-                    PixelAutoCaptioner.startLiveRecognitionOrFallback(context, engine)
+                    platform.startAutoCaptions(engine)
                 },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (engine.isListeningForCaptions) Color(0xFFFF5252) else Color(0xFF00E5FF),
@@ -451,7 +450,11 @@ private fun CaptionsAndAutoSpeechToolView(engine: ProjectEngine) {
                 shape = RoundedCornerShape(10.dp),
             ) {
                 Text(
-                    text = if (engine.isListeningForCaptions) "🎙️ Höre zu… (Pixel 9)" else "✨ Auto-Captions (Pixel 9 KI)",
+                    text = when {
+                        engine.isListeningForCaptions -> "🎙️ Höre zu… (Pixel 9)"
+                        platform.isMobile -> "✨ Auto-Captions (Pixel 9 KI)"
+                        else -> "✨ Auto-Captions"
+                    },
                     fontSize = 12.sp,
                     fontWeight = FontWeight.ExtraBold,
                 )

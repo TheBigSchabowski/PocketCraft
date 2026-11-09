@@ -71,6 +71,8 @@ import kotlin.math.roundToInt
  * - Format (9:16, 1:1, …), Zoom, Verschiebung (`move 10%l`), Drehung, Rand-Zuschnitt (`u20%`),
  * - Untertitel, Text- und Emoji-Overlays (eingebrannt), Blur, Farbfilter, Geschwindigkeit.
  */
+private typealias OutputSize = ExportLayout.OutputSize
+
 @OptIn(UnstableApi::class)
 object VideoExporter {
 
@@ -79,19 +81,8 @@ object VideoExporter {
         data class Failure(val message: String) : Outcome()
     }
 
-    data class OutputSize(val width: Int, val height: Int)
-
-    /** Ausgabeauflösung passend zum Seitenverhältnis (kurze Seite 720 oder 1080 px, je nach Quelle). */
-    fun outputSizeFor(project: VideoProject, sourceShortSide: Int?): OutputSize {
-        val aspect = project.aspectRatio.aspectFloat
-        val shortSide = if ((sourceShortSide ?: 1080) >= 1000) 1080 else 720
-        fun even(v: Float) = (v.roundToInt() / 2) * 2
-        return if (aspect <= 1f) {
-            OutputSize(shortSide, even(shortSide / aspect))
-        } else {
-            OutputSize(even(shortSide * aspect), shortSide)
-        }
-    }
+    fun outputSizeFor(project: VideoProject, sourceShortSide: Int?): OutputSize =
+        ExportLayout.outputSizeFor(project, sourceShortSide)
 
     /**
      * Startet den Export. Muss auf dem Main-Thread aufgerufen werden (Transformer-Anforderung).
@@ -292,13 +283,7 @@ object VideoExporter {
     }
 
     /** Pixel pro dp, damit Texte/Emojis im Video so groß wirken wie in der Vorschau (~391x421 dp Bühne). */
-    internal fun dpScale(size: OutputSize, project: VideoProject): Float {
-        val aspect = project.aspectRatio.aspectFloat
-        val stageW = 391f
-        val stageH = 421f
-        val previewWidthDp = if (stageW / stageH > aspect) stageH * aspect else stageW
-        return size.width / previewWidthDp
-    }
+    internal fun dpScale(size: OutputSize, project: VideoProject): Float = ExportLayout.dpScale(size, project)
 
     private fun readSourceShortSide(context: Context, uri: Uri): Int? = try {
         MediaMetadataRetriever().run {
@@ -313,9 +298,8 @@ object VideoExporter {
     }
 
     private fun publishToGallery(context: Context, tempFile: File, title: String): Outcome {
-        val safeTitle = title.substringBeforeLast(".mp4").replace(Regex("[^a-zA-Z0-9äöüÄÖÜß _-]"), "_").trim().ifEmpty { "PocketCraft" }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.GERMANY).format(Date())
-        val fileName = "PocketCraft_${safeTitle}_$stamp.mp4"
+        val fileName = ExportLayout.exportFileName(title, stamp)
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val resolver = context.contentResolver
@@ -372,7 +356,7 @@ internal class SegmentClock(private val segmentStartMs: Long) {
 internal class ExportOverlayRenderer(
     private val context: Context,
     private val project: VideoProject,
-    private val size: VideoExporter.OutputSize,
+    private val size: ExportLayout.OutputSize,
 ) {
     private val w = size.width.toFloat()
     private val h = size.height.toFloat()

@@ -12,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import com.example.pocketcraft.engine.FontRegistry
@@ -53,6 +54,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val context = LocalContext.current
+            val platform = remember { AndroidPlatformHooks(context) }
             val scope = rememberCoroutineScope()
 
             // Dateiwähler für echtes Video vom Pixel 9
@@ -128,6 +130,7 @@ class MainActivity : ComponentActivity() {
 
             PocketCraftApp(
                 engine = sharedEngine,
+                platform = platform,
                 onPickVideo = {
                     videoPicker.launch(arrayOf("video/*"))
                 },

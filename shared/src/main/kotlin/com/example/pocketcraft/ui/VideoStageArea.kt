@@ -49,6 +49,7 @@ import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
@@ -59,7 +60,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.pocketcraft.engine.FontRegistry
 import com.example.pocketcraft.engine.ProjectEngine
 import com.example.pocketcraft.model.BlurMode
 import com.example.pocketcraft.model.BuiltInFont
@@ -67,6 +67,7 @@ import com.example.pocketcraft.model.CustomFontEntry
 import com.example.pocketcraft.model.FilterConfig
 import com.example.pocketcraft.model.OverlayKind
 import com.example.pocketcraft.model.VideoFilterPreset
+import com.example.pocketcraft.platform.LocalPlatformHooks
 import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -79,11 +80,11 @@ import kotlin.math.sin
  */
 @Composable
 fun rememberComposeFontFamily(fontId: String, customFonts: List<CustomFontEntry>): FontFamily {
+    val platform = LocalPlatformHooks.current
     return remember(fontId, customFonts) {
         val custom = customFonts.firstOrNull { it.id == fontId }
         if (custom != null) {
-            val androidTypeface = FontRegistry.resolveAndroidTypeface(fontId, customFonts)
-            FontFamily(androidTypeface)
+            platform.customFontFamily(custom) ?: FontFamily.SansSerif
         } else {
             when (fontId) {
                 BuiltInFont.SANS_BOLD.id -> FontFamily.SansSerif
@@ -363,6 +364,23 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             .border(1.dp, Color(0xFF263248), RoundedCornerShape(14.dp))
             .clipToBounds()
             .pointerInput(Unit) {
+                // Mausrad / Trackpad-Scrollen zoomt (Desktop)
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type == PointerEventType.Scroll) {
+                            val dy = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
+                            if (dy != 0f) {
+                                val updatedZoom = (liveZoom * (1f - dy * 0.06f).coerceIn(0.7f, 1.4f)).coerceIn(1.0f, 5.0f)
+                                liveZoom = updatedZoom
+                                engine.setZoomAndPan(updatedZoom, livePanX, livePanY)
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    }
+                }
+            }
+            .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoomChange, _ ->
                     if (zoomChange != 1f || pan != Offset.Zero) {
                         val updatedZoom = (liveZoom * zoomChange).coerceIn(1.0f, 5.0f)
@@ -405,7 +423,7 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             val realUri = project.videoUri
             if (realUri != null) {
                 key(realUri) {
-                    TrimAwareVideoPlayer(
+                    LocalPlatformHooks.current.VideoPreview(
                         engine = engine,
                         videoUri = realUri,
                         modifier = Modifier.fillMaxSize(),
