@@ -91,6 +91,15 @@ object PocketScriptParser {
         option = RegexOption.IGNORE_CASE,
     )
 
+    private val idCounter = java.util.concurrent.atomic.AtomicLong()
+
+    /**
+     * Eindeutige ID für Untertitel, Overlays und Format-Spans. Die Uhrzeit allein reicht nicht:
+     * ein Skript legt mehrere Elemente in derselben Millisekunde an, und gleiche IDs lassen den
+     * Export das falsche (zwischengespeicherte) Bild zeigen.
+     */
+    private fun uniqueId(prefix: String): String = "${prefix}_${System.currentTimeMillis()}_${idCounter.incrementAndGet()}"
+
     private val legacyConditionWords = setOf(
         "caption", "sub", "untertitel", "text", "title", "titel", "emoji", "sticker", "filter", "fx", "blur",
     )
@@ -286,8 +295,9 @@ object PocketScriptParser {
      *
      * Unterstützte Formen:
      * 1. `if caption red: u20%` oder `if caption red: (9:16)`
-     *    → Sucht alle Untertitel mit der Farbe `.red` (oder dem Text `"red"`), wendet für deren
-     *      Zeitfenster den Befehl dahinter (`u20%`, `(9:16)`, `zoom 1,8` etc.) an und springt dorthin.
+     *    → Sucht alle Untertitel mit der Farbe `.red` (oder dem Text `"red"`), wendet **nur für deren
+     *      Zeitfenster** den Befehl dahinter (`u20%`, `(9:16)`, `zoom 1,8` etc.) an und springt dorthin.
+     *      Mehrere Befehle: `if caption red: u20%, move 10%u` (auch `&`, `und`, bei freiem Text `&&`).
      *      Falls noch kein passender Farb-Untertitel existiert, wird der aktuelle Untertitel am
      *      Playhead entsprechend eingefärbt und der Befehl direkt angewendet.
      * 2. `while caption red: u20%` / `while caption: (9:16)` / `while text cyan: u30%` / `while emoji 🔥: (1:1)`
@@ -312,15 +322,13 @@ object PocketScriptParser {
             val range = parseTimeRange(rangeTok, engine)
             val stepMs = parseSecondsToMs(stepMatch.groupValues[2]).coerceAtLeast(1_000L)
             var t = range.startMs
-            var iterations = 0
-            val lastResults = mutableListOf<String>()
-            while (t < range.endMs && iterations < 12) {
-                val wEnd = (t + stepMs).coerceAtMost(range.endMs)
-                lastResults.add(executeScopedBody(t, wEnd, actionBody, engine))
+            val windows = mutableListOf<Pair<Long, Long>>()
+            while (t < range.endMs && windows.size < 12) {
+                windows.add(t to (t + stepMs).coerceAtMost(range.endMs))
                 t += stepMs
-                iterations++
             }
-            return "$labelPrefix-Schleife ($iterations Schritte à ${ProjectEngine.formatSec(stepMs)}): ${lastResults.lastOrNull() ?: actionBody}"
+            val result = if (windows.isEmpty()) actionBody else executeConditionActions(windows, actionBody, engine)
+            return "$labelPrefix-Schleife (${windows.size} Schritte à ${ProjectEngine.formatSec(stepMs)}): $result"
         }
 
         // B) `if/while caption <qualifier>: <action>`
@@ -370,27 +378,8 @@ object PocketScriptParser {
                 return "$labelPrefix ($cond): Kein passender Untertitel gefunden."
             }
 
-            // Für alle gefundenen Untertitel-Zeitfenster den Zielbefehl ausführen
-            val combinedRangeExpr = buildCombinedScopedCommand(
-                ranges = matchedSubs.map { it.startMs to it.endMs },
-                actionBody = actionBody,
-            )
-            val execResult = if (combinedRangeExpr != null) {
-                // Wenn `if` genutzt wurde oder nur 1 Treffer vorliegt, setzen wir zusätzlich den globalen
-                // Zustand, damit der Effekt auch außerhalb des engen Zeitfensters sofort sichtbar ist.
-                val res = tryParseAndExecuteFormatAndCrop(combinedRangeExpr, engine)
-                    ?: engine.executeCommand(actionBody)
-                if (matchedSubs.size > 1) {
-                    tryParseAndExecuteFormatAndCrop("all $actionBody", engine)
-                }
-                res
-            } else {
-                var lastRes = ""
-                for (sub in matchedSubs) {
-                    lastRes = executeScopedBody(sub.startMs, sub.endMs, actionBody, engine)
-                }
-                lastRes
-            }
+            // Die Befehle gelten nur in den Zeitfenstern der gefundenen Untertitel – nicht fürs ganze Projekt
+            val execResult = executeConditionActions(matchedSubs.map { it.startMs to it.endMs }, actionBody, engine)
             engine.playheadMs = matchedSubs.first().startMs
             return "$labelPrefix ($cond → ${matchedSubs.size} Treffer): $execResult"
         }
@@ -420,20 +409,7 @@ object PocketScriptParser {
                 return "$labelPrefix ($cond): Kein passendes Overlay gefunden."
             }
 
-            val combinedRangeExpr = buildCombinedScopedCommand(
-                ranges = matchedOverlays.map { it.startMs to it.endMs },
-                actionBody = actionBody,
-            )
-            val execResult = if (combinedRangeExpr != null) {
-                tryParseAndExecuteFormatAndCrop(combinedRangeExpr, engine)
-                    ?: engine.executeCommand(actionBody)
-            } else {
-                var lastRes = ""
-                for (ov in matchedOverlays) {
-                    lastRes = executeScopedBody(ov.startMs, ov.endMs, actionBody, engine)
-                }
-                lastRes
-            }
+            val execResult = executeConditionActions(matchedOverlays.map { it.startMs to it.endMs }, actionBody, engine)
             engine.playheadMs = matchedOverlays.first().startMs
             return "$labelPrefix ($cond → ${matchedOverlays.size} Overlay-Treffer): $execResult"
         }
@@ -460,8 +436,9 @@ object PocketScriptParser {
         }
 
         return if (isGeneralMatch) {
-            val res = tryParseAndExecuteFormatAndCrop("all $actionBody", engine)
-                ?: engine.executeCommand(actionBody)
+            val res = splitConditionActions(actionBody).joinToString(" · ") { action ->
+                tryParseAndExecuteFormatAndCrop("all $action", engine) ?: engine.executeCommand(action)
+            }
             "$labelPrefix ($cond): $res"
         } else {
             "$labelPrefix ($cond): Bedingung aktuell nicht erfüllt."
@@ -654,6 +631,62 @@ object PocketScriptParser {
         }
     }
 
+    /** Befehle mit freiem Text (`set caption: Du & ich, wir`) – dort trennt nur `&&` mehrere Befehle. */
+    private val freeTextActionRegex = Regex(
+        pattern = """(?:^|\s)(?:caption|sub|untertitel|text|title|titel|emoji|sticker|print|echo|sag|zeige)\b""",
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    // `zoom 1,8` / `set zoom: 1,8` hinter einer Bedingung -> Zoom nur im Zeitfenster
+    private val scopedZoomRegex = Regex(
+        pattern = """^(?:set\s+)?(?:zoom|z)\s*:?\s*(\d+(?:[.,]\d+)?)x?$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    /**
+     * Zerlegt den Teil hinter `if …:` in einzelne Befehle:
+     * `u20%, move 10%u` · `u20% & zoom 1,5` · `u20% und move 10%u` · `set text: Hi && u20%`.
+     * Kommazahlen (`zoom 1,5`) bleiben ganz, weil ein Trenn-Komma ein Leerzeichen dahinter braucht.
+     */
+    private fun splitConditionActions(actionBody: String): List<String> {
+        val body = actionBody.trim()
+        val separator = if (freeTextActionRegex.containsMatchIn(body)) {
+            Regex("""\s*&&\s*""")
+        } else {
+            Regex("""\s*&&?\s*|\s*,\s+|\s+(?:und|and)\s+""", RegexOption.IGNORE_CASE)
+        }
+        return body.split(separator).map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf(body) }
+    }
+
+    /**
+     * Führt die Befehle hinter einer Bedingung **nur in den Zeitfenstern [ranges]** aus (z.B. solange
+     * der rote Untertitel eingeblendet ist). Der globale Zuschnitt / das globale Format bleiben unberührt –
+     * fürs ganze Projekt gibt es weiterhin `all u20%`.
+     */
+    private fun executeConditionActions(
+        ranges: List<Pair<Long, Long>>,
+        actionBody: String,
+        engine: ProjectEngine,
+    ): String = splitConditionActions(actionBody).joinToString(" · ") { action ->
+        val zoomMatch = scopedZoomRegex.matchEntire(action)
+        val combined = buildCombinedScopedCommand(ranges, action)
+        when {
+            zoomMatch != null -> {
+                val zoom = (zoomMatch.groupValues[1].replace(",", ".").toFloatOrNull() ?: 1.5f).coerceIn(1.0f, 5.0f)
+                engine.commitChange("PocketScript Zoom ${zoom}x (${ranges.size} Zeitfenster)") { p ->
+                    val spans = ranges.map { (startMs, endMs) ->
+                        TimedFormatSpan(id = uniqueId("fmt"), startMs = startMs, endMs = endMs, hasCustomRatio = false, zoom = zoom)
+                    }
+                    p.copy(timedFormatSpans = (p.timedFormatSpans + spans).takeLast(24))
+                }
+                "Zoom ${zoom}x nur in ${ranges.size} Zeitfenster(n)"
+            }
+            combined != null ->
+                tryParseAndExecuteFormatAndCrop(combined, engine, scopedOnly = true) ?: engine.executeCommand(action)
+            else -> ranges.map { (startMs, endMs) -> executeScopedBody(startMs, endMs, action, engine) }.last()
+        }
+    }
+
     private fun buildCombinedScopedCommand(
         ranges: List<Pair<Long, Long>>,
         actionBody: String,
@@ -665,6 +698,7 @@ object PocketScriptParser {
                 ratioTokenRegex.matches(it) ||
                     edgeCropTokenRegex.matches(it) ||
                     moveSuffixTokenRegex.matches(it) ||
+                    movePrefixTokenRegex.matches(it) ||
                     it.lowercase() in listOf("move", "shift", "pan", "verschiebe")
             }
         ) {
@@ -704,7 +738,7 @@ object PocketScriptParser {
      * prozentualen Verschiebungen (`all move 10%l` = 10% lower/runter, `all move 10%u` = 10% up/hoch,
      * `u20% move 10%l`) aus.
      */
-    private fun tryParseAndExecuteFormatAndCrop(raw: String, engine: ProjectEngine): String? {
+    private fun tryParseAndExecuteFormatAndCrop(raw: String, engine: ProjectEngine, scopedOnly: Boolean = false): String? {
         var normalized = raw.trim()
 
         // Optionales führendes `crop ` entfernen, falls dahinter Richtungs-Cuts wie `u20%` folgen
@@ -849,7 +883,7 @@ object PocketScriptParser {
             if (hasRatio || (!range.isAll && (hasEdgeCrop || hasMove))) {
                 newSpans.add(
                     TimedFormatSpan(
-                        id = "fmt_${System.currentTimeMillis()}_$idx",
+                        id = uniqueId("fmt"),
                         startMs = range.startMs,
                         endMs = range.endMs,
                         ratioWidth = seg.ratioW ?: 9f,
@@ -865,13 +899,15 @@ object PocketScriptParser {
                 )
             }
 
-            if (hasRatio && (range.isAll || segments.size == 1)) {
+            // [scopedOnly] (Befehl hinter einer Bedingung): nur das Zeitfenster ändern, nie das ganze Projekt
+            val alsoGlobal = range.isAll || (segments.size == 1 && !scopedOnly)
+            if (hasRatio && alsoGlobal) {
                 globalPreset = matchClosestAspectPreset(seg.ratioW ?: 9f, seg.ratioH ?: 16f)
             }
 
             // Wenn `all` (z.B. `all u20%`, `all move 10%l`) ODER ein einzelnes Segment (`90 u90%`) angegeben wurde,
             // aktualisieren wir auch den Basis-Transform, damit Zuschnitt und Verschiebung sofort global sitzen.
-            if ((hasEdgeCrop || hasMove) && (range.isAll || segments.size == 1)) {
+            if ((hasEdgeCrop || hasMove) && alsoGlobal) {
                 shouldUpdateGlobalCrop = true
                 if (range.isAll) {
                     clearTimedCropOverrides = true
@@ -1019,7 +1055,7 @@ object PocketScriptParser {
                 val sizeSp = styled.fontSizeSp ?: 20f
                 val yPos = styled.yPercent ?: 0.82f
                 val sub = SubtitleSegment(
-                    id = "ps_sub_${System.currentTimeMillis()}",
+                    id = uniqueId("ps_sub"),
                     startMs = range.startMs,
                     endMs = range.endMs,
                     text = styled.cleanText,
@@ -1050,7 +1086,7 @@ object PocketScriptParser {
                 val scale = styled.scale ?: 1.15f
                 val yPos = styled.yPercent ?: 0.32f
                 val overlay = CanvasOverlay(
-                    id = "ps_txt_${System.currentTimeMillis()}",
+                    id = uniqueId("ps_txt"),
                     kind = OverlayKind.TEXT,
                     content = styled.cleanText,
                     xPercent = 0.5f,
@@ -1078,7 +1114,7 @@ object PocketScriptParser {
                 val scale = styled.scale ?: 1.4f
                 val yPos = styled.yPercent ?: 0.40f
                 val overlay = CanvasOverlay(
-                    id = "ps_emo_${System.currentTimeMillis()}",
+                    id = uniqueId("ps_emo"),
                     kind = OverlayKind.EMOJI,
                     content = styled.cleanText,
                     xPercent = 0.5f,
@@ -1383,8 +1419,10 @@ object PocketScriptPdfManualGenerator {
         ManualSection(
             title = "3. Bedingungen & Schleifen (if / while)",
             codeExamples = listOf(
-                "if caption red: u20%" to "Wenn ein roter Untertitel aktiv ist, dort unten 20 % wegschneiden.",
-                "if caption red: (9:16)" to "Wenn ein roter Untertitel aktiv ist, Format auf (9:16) setzen.",
+                "if caption red: u20%" to "Nur solange der rote Untertitel eingeblendet ist, unten 20 % wegschneiden (fürs ganze Video: all u20%).",
+                "if caption red: u20%, move 10%u, zoom 1,5" to "Mehrere Befehle hinter einer Bedingung – getrennt mit Komma, & oder und (bei Text-Befehlen mit &&).",
+                "if caption red; u20%; move 10%u; end" to "Dasselbe als Block – im Code-Fenster eine Zeile pro Befehl statt ';'.",
+                "if caption red: (9:16)" to "Solange der rote Untertitel läuft, Format auf (9:16) schalten.",
                 "while caption red: u40%" to "Solange rote Untertitel eingeblendet sind, unten 40 % wegschneiden.",
                 "while caption: (1:1)" to "Solange irgendein Untertitel läuft, Format auf (1:1) schalten.",
                 "if text cyan: u20%" to "Wenn ein cyanfarbenes Text-Overlay aktiv ist, unten 20 % wegschneiden.",
@@ -1459,6 +1497,7 @@ object PocketScriptPdfManualGenerator {
                 "zoom 1,8" to "Zoomt stufenlos ins Video (1.0x bis 5.0x).",
                 "all set filter: cyberpunk" to "Aktiviert den Look-Filter (cyberpunk, cinematic, bw, vintage, vivid).",
                 "undo" to "Macht den letzten Schritt rückgängig (redo stellt ihn wieder her).",
+                "demo" to "Baut aus dem geladenen Video einen Vorführ-Clip, der jede Funktion in einem eigenen Kapitel zeigt (als Kopie 'PocketCraft Demo').",
             ),
         ),
     )

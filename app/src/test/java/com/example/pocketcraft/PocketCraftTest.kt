@@ -148,8 +148,12 @@ class PocketCraftTest {
         engine.executeCommand("if caption red: u20%")
         assertEquals(0.80f, engine.currentTransform(9_000L).cropBottom, 0.01f)
 
+        // Bedingungen gelten nur im Zeitfenster des Untertitels, nicht fürs ganze Projekt
+        assertEquals(1.0f, engine.currentTransform(3_000L).cropBottom, 0.01f)
+
         engine.executeCommand("if caption red: (9:16)")
-        assertEquals(AspectRatioPreset.PORTRAIT_9_16, engine.project.aspectRatio)
+        assertEquals(9f / 16f, engine.currentAspectFloat(9_000L), 0.01f)
+        assertEquals(AspectRatioPreset.SQUARE_1_1, engine.project.aspectRatio)
 
         engine.executeCommand("while caption red: u40%")
         assertEquals(0.60f, engine.currentTransform(9_000L).cropBottom, 0.01f)

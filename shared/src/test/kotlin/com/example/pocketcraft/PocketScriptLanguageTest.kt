@@ -141,6 +141,76 @@ class PocketScriptLanguageTest {
     }
 
     @Test
+    fun captionConditionOnlyAppliesWhileTheCaptionIsVisible() {
+        val e = engine()
+        e.executeCommand("0-2 set caption: Hallo.red")
+        e.executeCommand("if caption red: u20%")
+        assertEquals(0.80f, e.currentTransform(1_000L).cropBottom, 0.01f)
+        assertEquals(1.0f, e.currentTransform(5_000L).cropBottom, 0.01f)
+        assertEquals(1.0f, e.project.transform.cropBottom, 0.01f)
+
+        // Auch bei mehreren Treffern bleibt der Rest des Videos unberührt
+        val many = engine()
+        many.executeCommand("0-2 set caption: Eins.red; 6-8 set caption: Zwei.red; if caption red: u20%")
+        assertEquals(0.80f, many.currentTransform(7_000L).cropBottom, 0.01f)
+        assertEquals(1.0f, many.currentTransform(4_000L).cropBottom, 0.01f)
+    }
+
+    @Test
+    fun conditionAcceptsSeveralCommands() {
+        for (script in listOf(
+            "if caption red: u20%, move 10%u, zoom 1,5",
+            "if caption red: u20% & move 10%u & zoom 1,5",
+            "if caption red: u20% und move 10%u und zoom 1,5",
+            "if caption red: u20% move 10%u && zoom 1,5",
+            "if caption red\nu20%\nmove 10%u\nzoom 1,5\nend",
+        )) {
+            val e = engine()
+            e.executeCommand("0-2 set caption: Hallo.red")
+            e.executeCommand(script)
+            val inside = e.currentTransform(1_000L)
+            assertEquals(0.80f, inside.cropBottom, 0.01f, script)
+            assertEquals(-0.10f, inside.panY, 0.01f, script)
+            assertEquals(1.5f, inside.zoom, 0.01f, script)
+            val outside = e.currentTransform(5_000L)
+            assertEquals(1.0f, outside.cropBottom, 0.01f, script)
+            assertEquals(0f, outside.panY, 0.01f, script)
+            assertEquals(1.0f, outside.zoom, 0.01f, script)
+        }
+
+        // Freier Text darf Kommas und "und" enthalten – dort trennt nur &&
+        val text = engine()
+        text.executeCommand("0-2 set caption: Hallo.red")
+        text.executeCommand("if caption red: set text: Du, ich und er && u20%")
+        assertTrue(text.project.overlays.any { it.content == "Du, ich und er" && it.startMs == 0L && it.endMs == 2_000L })
+        assertEquals(0.80f, text.currentTransform(1_000L).cropBottom, 0.01f)
+    }
+
+    @Test
+    fun demoCommandBuildsAShowcaseOfEveryFeature() {
+        val short = engine()
+        short.executeCommand("demo")
+        assertTrue(short.commandHistory.last().isError, "15-Sekunden-Projekt ist zu kurz für die Demo")
+
+        val e = ProjectEngine()
+        e.setVideoSource("/tmp/beispiel.mp4", 163_000L, "beispiel.mp4")
+        val result = e.executeCommand("demo")
+        assertFalse(e.commandHistory.last().isError, result)
+        assertEquals(72_000L, e.project.playableDurationMs)
+        assertEquals(14, e.project.subtitles.size)
+        assertEquals(13, e.project.overlays.count { it.kind == OverlayKind.TEXT })
+        // Zoom und Zuschnitt gelten nur in ihrem Kapitel
+        assertEquals(1.8f, e.currentTransform(33_000L).zoom, 0.01f)
+        assertEquals(0.80f, e.currentTransform(39_000L).cropBottom, 0.01f)
+        assertEquals(1.0f, e.currentTransform(3_000L).zoom, 0.01f)
+        assertEquals(1.0f, e.currentTransform(3_000L).cropBottom, 0.01f)
+        assertEquals(1.0f, e.project.transform.cropBottom, 0.01f)
+        // Schnell hintereinander angelegte Elemente brauchen trotzdem unterschiedliche IDs
+        val ids = e.project.subtitles.map { it.id } + e.project.overlays.map { it.id } + e.project.timedFormatSpans.map { it.id }
+        assertEquals(ids.size, ids.toSet().size)
+    }
+
+    @Test
     fun classicCommandsAndRulesStillBehaveAsBefore() {
         val e = engine()
         // Regel vor dem passenden Untertitel: wird wie bisher nach den Setup-Zeilen ausgewertet

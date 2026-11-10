@@ -1087,8 +1087,23 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 resultMessage = "Alle Effekte, Zoom und Schnitte auf Ausgangszustand zurückgesetzt."
             }
 
+            "demo", "vorführung", "vorfuehrung" -> {
+                if (project.sourceDurationMs < PocketScriptDemo.MIN_DURATION_MS) {
+                    isError = true
+                    resultMessage = "Für die Demo braucht es ein Video mit mindestens ${PocketScriptDemo.MIN_DURATION_MS / 1000} Sekunden."
+                } else {
+                    executeCommand(PocketScriptDemo.script)
+                    val failed = commandHistory.lastOrNull()?.isError == true
+                    isError = failed
+                    resultMessage = if (failed) {
+                        commandHistory.last().response
+                    } else {
+                        "Demo fertig: ${formatSec(project.playableDurationMs)} mit ${project.subtitles.size} Untertiteln – abspielen oder 'export' tippen."
+                    }
+                }
+            }
             "help", "?" -> {
-                resultMessage = "Programmieren: let x = 5, zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
+                resultMessage = "Vorführung: demo · Programmieren: let x = 5, zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
             }
 
             else -> {
