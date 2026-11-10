@@ -1,5 +1,5 @@
 [versions]
-app = "1.4.0"
+app = "1.4.1"
 agp = "9.2.1"
 kotlin = "2.3.21"
 composeMultiplatform = "1.11.1"

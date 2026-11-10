@@ -13,6 +13,7 @@ def titel(text, farbe): 0-3 set text: $text.$farbe.big.top
 titel(Mein Urlaub, gold)                    # eigene Funktion
 if $duration > 30: delete after 00:30       # Bedingung
 if caption red: u20%, move 10%u, zoom 1,5   # gilt nur, solange der rote Untertitel läuft
+global favoriten = [🚀, ⭐, 🎉]              # global: gilt in allen Projekten (let: nur in diesem)
 ```
 
 Zum Ausprobieren: Video laden und `demo` tippen – PocketCraft baut daraus einen Clip, der jede Funktion

@@ -899,15 +899,15 @@ object PocketScriptParser {
                 )
             }
 
-            // [scopedOnly] (Befehl hinter einer Bedingung): nur das Zeitfenster ändern, nie das ganze Projekt
-            val alsoGlobal = range.isAll || (segments.size == 1 && !scopedOnly)
-            if (hasRatio && alsoGlobal) {
+            // Das Ausgabeformat ist pro Video fest, deshalb setzt ein einzelner Format-Befehl (`10-20 (1:1)`)
+            // weiterhin auch das Projektformat – außer hinter einer Bedingung ([scopedOnly]).
+            if (hasRatio && (range.isAll || (segments.size == 1 && !scopedOnly))) {
                 globalPreset = matchClosestAspectPreset(seg.ratioW ?: 9f, seg.ratioH ?: 16f)
             }
 
-            // Wenn `all` (z.B. `all u20%`, `all move 10%l`) ODER ein einzelnes Segment (`90 u90%`) angegeben wurde,
-            // aktualisieren wir auch den Basis-Transform, damit Zuschnitt und Verschiebung sofort global sitzen.
-            if ((hasEdgeCrop || hasMove) && alsoGlobal) {
+            // Nur `all` (oder gar keine Zeitangabe: `u20%`, `move 10%l`) ändert den Basis-Transform des ganzen
+            // Videos. Mit Zeitbereich (`0-2 u20%`, `90 u90%`) gilt der Zuschnitt ausschließlich in diesem Fenster.
+            if ((hasEdgeCrop || hasMove) && range.isAll) {
                 shouldUpdateGlobalCrop = true
                 if (range.isAll) {
                     clearTimedCropOverrides = true
@@ -1378,7 +1378,8 @@ object PocketScriptPdfManualGenerator {
                 "all move 10%u" to "Verschiebt das Bild um 10 % nach oben (10%u = 10% up).",
                 "u20% move 10%l" to "Unten 20 % abschneiden und direkt um 10 % nach unten verschieben.",
                 "all o20%" to "Oben (o) 20 % wegschneiden (geht auch mit r20% rechts und l20% links).",
-                "90 u90%" to "Schneidet unten 90 % weg – es bleibt oben nur noch ein schmaler 10%-Balken.",
+                "0-2 u20%" to "Mit Zeitbereich gilt der Zuschnitt nur in diesem Fenster – hier in den ersten 2 Sekunden.",
+                "90 u90%" to "Ab Sekunde 90 unten 90 % wegschneiden – dort bleibt oben nur ein schmaler 10%-Balken.",
             ),
         ),
         ManualSection(
@@ -1437,6 +1438,9 @@ object PocketScriptPdfManualGenerator {
                 "let ende = \$x * 2 + 1" to "Rechnen mit + - * / % und Klammern, auch min(), max(), round(), random().",
                 "0-{\$x + 3} set caption: Start.gold" to "Geschweifte Klammern rechnen direkt im Befehl: 0 bis 5,5 Sekunden.",
                 "x += 1" to "Ändert eine Variable (auch -=, *=, /=).",
+                "global logo = 🚀" to "Globale Variable: gilt in allen Projekten und bleibt nach dem Neustart erhalten. Ohne global gehört eine Variable zum Projekt und wird mit ihm gespeichert.",
+                "let favoriten = [🚀, ⭐, 🎉]" to "Eine Liste merken – danach: for e in \$favoriten: … (auch als global favoriten = […]).",
+                "unset x" to "Löscht eine Variable (unset global x für eine globale, auch für Funktionen; clear vars / clear globals löscht alle).",
                 "print Video dauert \$duration s, \$captions Untertitel" to "Eingebaute Werte: \$duration, \$trimstart, \$trimend, \$playhead, \$zoom, \$captions, \$texts, \$emojis.",
             ),
         ),
@@ -1459,6 +1463,7 @@ object PocketScriptPdfManualGenerator {
                 "def haelfte(x) = \$x / 2" to "Rechen-Funktion: liefert einen Wert zurück.",
                 "zoom {haelfte(5)}" to "… und lässt sich in jeder Rechnung verwenden (zoom 2,5).",
                 "def intro(); all (9:16); 0-2 set caption: Los gehts!.yellow; end" to "Mehrere Befehle als Block bis end.",
+                "global def titel(text): 0-3 set text: \$text.gold.big.top" to "Globale Funktion: in allen Projekten verfügbar. Ohne global gehört sie zum Projekt; beide bleiben nach dem Neustart erhalten.",
             ),
         ),
         ManualSection(

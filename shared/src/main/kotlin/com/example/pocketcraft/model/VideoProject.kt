@@ -30,6 +30,10 @@ data class VideoProject(
     val subtitles: List<SubtitleSegment> = defaultDemoSubtitles(),
     val overlays: List<CanvasOverlay> = defaultDemoOverlays(),
     val customFonts: List<CustomFontEntry> = emptyList(),
+    /** PocketScript-Variablen dieses Projekts (`let x = 5`), als Text gespeichert. */
+    val variables: Map<String, String> = emptyMap(),
+    /** PocketScript-Funktionen dieses Projekts (`def name(a): …`), Name → Definition als Text. */
+    val functions: Map<String, String> = emptyMap(),
     val activeFontId: String = BuiltInFont.SANS_BOLD.id,
 ) {
     /** Effektive Länge des geschnittenen Clips in Millisekunden. */

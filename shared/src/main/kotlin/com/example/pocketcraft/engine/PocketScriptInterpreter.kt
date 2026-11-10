@@ -8,8 +8,25 @@ import com.example.pocketcraft.model.OverlayKind
  * Befehlszeile erst `let x = 3` und danach `zoom $x` tippen kann.
  */
 class ScriptEnvironment {
+    /** Variablen des geöffneten Projekts (`let x = 5`) – werden mit dem Projekt gespeichert. */
     val variables = linkedMapOf<String, Any>()
+
+    /** Globale Variablen (`global x = 5`) – gelten in allen Projekten. */
+    val globals = linkedMapOf<String, Any>()
+
+    /** Funktionen des geöffneten Projekts (`def name(a): …`) – werden mit dem Projekt gespeichert. */
     val functions = linkedMapOf<String, ScriptFunction>()
+
+    /** Globale Funktionen (`global def name(a): …`) – gelten in allen Projekten. */
+    val globalFunctions = linkedMapOf<String, ScriptFunction>()
+
+    /** Funktion mit diesem Namen: die des Projekts hat Vorrang vor einer globalen. */
+    fun function(name: String): ScriptFunction? = name.lowercase().let { functions[it] ?: globalFunctions[it] }
+
+    companion object {
+        /** Gespeicherter Text zurück in einen Wert: Zahlen werden wieder Zahlen. */
+        fun decode(text: String): Any = ScriptExpression.parseNumber(text) ?: text
+    }
 
     fun clear() {
         variables.clear()
@@ -23,13 +40,16 @@ class ScriptFunction(
     val params: List<String>,
     internal val body: List<PocketScriptInterpreter.Stmt>,
     val formula: String?,
+    /** Die Definition als Text (ohne `global`), damit sie gespeichert und wieder geladen werden kann. */
+    val source: String = "",
 )
 
 /**
  * Programmier-Konstrukte für **PocketScript** – alles, was über einen einzelnen Schnittbefehl hinausgeht:
  *
  * ```
- * let abstand = 4                      # Variable
+ * let abstand = 4                      # Variable dieses Projekts (wird mit ihm gespeichert)
+ * global favoriten = [🚀, ⭐, 🎉]           # globale Variable: gilt in allen Projekten
  * for t in 0..12 step $abstand         # Zählschleife (Block bis `end`)
  *   $t-{$t + 2} set emoji: 🔥          # $name und {Rechnung} werden in Befehle eingesetzt
  * end
@@ -39,7 +59,7 @@ class ScriptFunction(
  * else
  *   print Es gibt $captions Untertitel
  * end
- * def titel(text, farbe)               # eigene Funktion
+ * def titel(text, farbe)               # eigene Funktion (global def …: in allen Projekten)
  *   0-3 set text: $text.$farbe.big.top
  * end
  * titel(Mein Urlaub, gold)
@@ -62,37 +82,56 @@ object PocketScriptInterpreter {
         abstract val line: Int
 
         data class Command(override val line: Int, val text: String) : Stmt()
-        data class Assign(override val line: Int, val name: String, val op: String, val valueText: String) : Stmt()
+        data class Assign(
+            override val line: Int,
+            val name: String,
+            val op: String,
+            val valueText: String,
+            /** Mit `let`/`$` ausdrücklich angelegt (sonst darf `x = 1` auch eine globale Variable ändern). */
+            val declared: Boolean = true,
+            /** `global x = 1`: gilt in allen Projekten. */
+            val global: Boolean = false,
+        ) : Stmt()
         data class Print(override val line: Int, val text: String) : Stmt()
         data class If(override val line: Int, val branches: List<Branch>, val elseBody: List<Stmt>?) : Stmt()
         data class While(override val line: Int, val keyword: String, val condition: String, val body: List<Stmt>) : Stmt()
         data class For(override val line: Int, val variable: String, val source: String, val body: List<Stmt>) : Stmt()
         data class Repeat(override val line: Int, val count: String, val body: List<Stmt>) : Stmt()
-        data class Def(override val line: Int, val function: ScriptFunction) : Stmt()
+        data class Def(override val line: Int, val function: ScriptFunction, val global: Boolean = false) : Stmt()
         data class Call(override val line: Int, val name: String, val args: String) : Stmt()
-        data class Vars(override val line: Int, val clear: Boolean = false) : Stmt()
-        data class Unset(override val line: Int, val name: String) : Stmt()
+        data class Vars(override val line: Int, val clear: Boolean = false, val globals: Boolean = false) : Stmt()
+        data class Unset(override val line: Int, val name: String, val global: Boolean = false) : Stmt()
     }
 
     data class Branch(val keyword: String, val condition: String, val body: List<Stmt>)
 
     private const val NAME = """[\p{L}_][\p{L}\p{N}_]*"""
-    private val assignRegex = Regex("""^(?:(?:let|var|sei)\s+)?\$?($NAME)\s*([+\-*/]?)=(?!=)\s*(.*)$""", RegexOption.IGNORE_CASE)
+    private val assignRegex = Regex(
+        """^(?:(?:let|var|sei)\s+)?(?:(global)\s+)?(?:(?:let|var|sei)\s+)?\$?($NAME)\s*([+\-*/]?)=(?!=)\s*(.*)$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val printRegex = Regex("""^(?:print|echo|sag|zeige)(?:\s+(.*))?$""", RegexOption.IGNORE_CASE)
     private val ifRegex = Regex("""^(if|wenn|elif|else\s+if|sonst\s+wenn)\s+(.+)$""", RegexOption.IGNORE_CASE)
     private val whileRegex = Regex("""^(while|solange)\s+(.+)$""", RegexOption.IGNORE_CASE)
     private val forRegex = Regex("""^(?:for|für|fuer)\s+\$?($NAME)\s+in\s+(.+)$""", RegexOption.IGNORE_CASE)
     private val repeatRegex = Regex("""^(?:repeat|wiederhole)\s+(.+)$""", RegexOption.IGNORE_CASE)
-    private val defRegex = Regex("""^(?:def|fn|func|function|funktion)\s+($NAME)\s*\(([^)]*)\)\s*(.*)$""", RegexOption.IGNORE_CASE)
+    private val defRegex = Regex(
+        """^(?:(global)\s+)?(?:def|fn|func|function|funktion)\s+($NAME)\s*\(([^)]*)\)\s*(.*)$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val callRegex = Regex("""^($NAME)\((.*)\)$""")
-    private val unsetRegex = Regex("""^(?:unset|vergiss)\s+\$?($NAME)$""", RegexOption.IGNORE_CASE)
+    private val unsetRegex = Regex("""^(?:unset|vergiss)\s+(?:(global)\s+)?\$?($NAME)$""", RegexOption.IGNORE_CASE)
+    private val clearGlobalsRegex = Regex(
+        """^(?:clear|lösche|loesche|vergiss)\s+(?:all\s+|alle\s+)?(?:globals|global\s+vars|globale\s+variablen)$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val clearVarsRegex = Regex("""^(?:clear|lösche|loesche|vergiss)\s+(?:all\s+|alle\s+)?(?:vars|variablen)$""", RegexOption.IGNORE_CASE)
     private val endWords = setOf("end", "ende", "}")
     private val elseWords = setOf("else", "sonst", "else:", "sonst:")
 
     /** Sprach-Schlüsselwörter: nie als Variablen-, Parameter- oder Funktionsname erlaubt. */
     private val keywordNames = setOf(
-        "if", "wenn", "elif", "while", "solange", "for", "repeat", "def", "end", "ende", "else", "sonst", "let", "var",
+        "if", "wenn", "elif", "while", "solange", "for", "repeat", "def", "end", "ende", "else", "sonst", "let", "var", "global",
         "print", "true", "false", "and", "or", "not", "und", "oder", "nicht", "in", "step",
     )
 
@@ -164,10 +203,19 @@ object PocketScriptInterpreter {
         return run.summary()
     }
 
+    /** Liest eine gespeicherte Funktions-Definition wieder ein (`null`, falls sie nicht mehr lesbar ist). */
+    fun parseFunction(source: String, engine: ProjectEngine): ScriptFunction? = try {
+        val lines = source.split(Regex("[\r\n;]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        (parseBlock(LineReader(lines), topLevel = true, Run(engine)).firstOrNull() as? Stmt.Def)?.function
+    } catch (_: ScriptError) {
+        null
+    }
+
     // ---------------------------------------------------------------- Parser (Zeilen -> Anweisungen)
 
     private class LineReader(private val lines: List<String>) {
         var index = 0
+        fun slice(from: Int, to: Int) = lines.subList(from, to)
         fun hasNext() = index < lines.size
         fun peek() = lines[index]
         fun next() = lines[index++]
@@ -235,26 +283,30 @@ object PocketScriptInterpreter {
 
         if (text.equals("vars", ignoreCase = true) || text.equals("variablen", ignoreCase = true)) return Stmt.Vars(line)
         if (clearVarsRegex.matches(text)) return Stmt.Vars(line, clear = true)
-        unsetRegex.matchEntire(text)?.let { return Stmt.Unset(line, it.groupValues[1]) }
+        if (clearGlobalsRegex.matches(text)) return Stmt.Vars(line, clear = true, globals = true)
+        unsetRegex.matchEntire(text)?.let { return Stmt.Unset(line, it.groupValues[2], global = it.groupValues[1].isNotEmpty()) }
         printRegex.matchEntire(text)?.let { return Stmt.Print(line, it.groupValues[1]) }
 
         defRegex.matchEntire(text)?.let { m ->
-            val name = m.groupValues[1]
-            val params = m.groupValues[2].split(",").map { it.trim().removePrefix("$") }.filter { it.isNotEmpty() }
-            val tail = m.groupValues[3].trim()
+            val firstLine = reader.index - 1
+            val global = m.groupValues[1].isNotEmpty()
+            val name = m.groupValues[2]
+            val params = m.groupValues[3].split(",").map { it.trim().removePrefix("$") }.filter { it.isNotEmpty() }
+            val tail = m.groupValues[4].trim()
             checkName(name, line)
             params.forEach { checkName(it, line) }
-            val function = when {
-                tail.startsWith("=") -> ScriptFunction(name, params, emptyList(), tail.removePrefix("=").trim())
-                else -> {
-                    val inline = tail.removePrefix(":").trim()
-                    val stmts = body(reader, inline, run, line)
-                    if (inline.isEmpty()) expectEnd(reader, "def $name", line)
-                    ScriptFunction(name, params, stmts, null)
-                }
+            val formula = if (tail.startsWith("=")) tail.removePrefix("=").trim() else null
+            val stmts = if (formula != null) {
+                emptyList()
+            } else {
+                val inline = tail.removePrefix(":").trim()
+                body(reader, inline, run, line).also { if (inline.isEmpty()) expectEnd(reader, "def $name", line) }
             }
+            // Alle Zeilen der Definition (bei Blöcken bis `end`) als Text merken – ohne das `global` davor
+            val source = reader.slice(firstLine, reader.index).joinToString("\n")
+                .replaceFirst(Regex("""^global\s+""", RegexOption.IGNORE_CASE), "")
             run.declaredFunctions.add(name.lowercase())
-            return Stmt.Def(line, function)
+            return Stmt.Def(line, ScriptFunction(name, params, stmts, formula, source), global)
         }
 
         forRegex.matchEntire(text)?.let { m ->
@@ -314,18 +366,20 @@ object PocketScriptInterpreter {
         }
 
         assignRegex.matchEntire(text)?.let { m ->
-            val declared = text.startsWith("$") || Regex("""^(let|var|sei)\s""", RegexOption.IGNORE_CASE).containsMatchIn(text)
-            val name = m.groupValues[1]
+            val global = m.groupValues[1].isNotEmpty()
+            val declared = global || text.startsWith("$") ||
+                Regex("""^(let|var|sei)\s""", RegexOption.IGNORE_CASE).containsMatchIn(text)
+            val name = m.groupValues[2]
             // `caption = x` o.ä. ohne let/$ ist kein Zuweisungsversuch, sondern ein (unbekannter) Befehl
             if (declared || name.lowercase() !in commandWords) {
                 checkName(name, line)
-                return Stmt.Assign(line, name, m.groupValues[2], m.groupValues[3].trim())
+                return Stmt.Assign(line, name, m.groupValues[3], m.groupValues[4].trim(), declared, global)
             }
         }
 
         callRegex.matchEntire(text)?.let { m ->
             val name = m.groupValues[1]
-            if (name.lowercase() in run.declaredFunctions || run.engine.scriptEnv.functions.containsKey(name.lowercase())) {
+            if (name.lowercase() in run.declaredFunctions || run.engine.scriptEnv.function(name) != null) {
                 return Stmt.Call(line, name, m.groupValues[2])
             }
         }
@@ -354,22 +408,31 @@ object PocketScriptInterpreter {
         override fun variable(name: String): Any? {
             val key = name.lowercase()
             for (i in locals.indices.reversed()) locals[i][key]?.let { return it }
-            return env.variables[key] ?: builtinVariables[key]?.invoke(engine)
+            // Reihenfolge: Funktions-Parameter, Projekt-Variable, globale Variable, eingebauter Wert
+            return env.variables[key] ?: env.globals[key] ?: builtinVariables[key]?.invoke(engine)
         }
 
-        private fun assign(name: String, value: Any) {
+        /** Legt eine Variable an oder ändert sie; gibt zurück, ob dabei eine globale Variable geschrieben wurde. */
+        private fun assign(name: String, value: Any, declared: Boolean = true, global: Boolean = false): Boolean {
             val key = name.lowercase()
             val frame = locals.lastOrNull()
-            // In einer Funktion: bestehende globale Variable ändern, sonst lokal anlegen
-            if (frame != null && (frame.containsKey(key) || !env.variables.containsKey(key))) {
-                frame[key] = value
-            } else {
-                env.variables[key] = value
+            // `x = 1` / `x += 1` ohne let ändert eine bestehende globale Variable, statt sie im Projekt zu überdecken
+            val updatesGlobal = global || (!declared && env.globals.containsKey(key) &&
+                !env.variables.containsKey(key) && frame?.containsKey(key) != true)
+            when {
+                updatesGlobal -> {
+                    env.globals[key] = value
+                    engine.persistGlobals()
+                }
+                // In einer Funktion: bestehende Projekt-Variable ändern, sonst lokal anlegen
+                frame != null && (frame.containsKey(key) || !env.variables.containsKey(key)) -> frame[key] = value
+                else -> env.variables[key] = value
             }
+            return updatesGlobal
         }
 
         override fun callFunction(name: String, args: List<Any>): Any? {
-            val fn = env.functions[name.lowercase()] ?: return null
+            val fn = env.function(name) ?: return null
             val formula = fn.formula
                 ?: throw ScriptError("'${fn.name}' ist ein Befehls-Block und liefert keinen Wert (nutze def ${fn.name}(…) = Formel).")
             return withFrame(fn, args) { ScriptExpression.evaluate(formula, this) }
@@ -435,7 +498,7 @@ object PocketScriptInterpreter {
             val resolved = interpolate(text).trim()
             // Aufruf einer Funktion, die erst weiter unten im Skript definiert wurde
             callRegex.matchEntire(resolved)?.let { m ->
-                if (env.functions.containsKey(m.groupValues[1].lowercase())) {
+                if (env.function(m.groupValues[1]) != null) {
                     executeOne(Stmt.Call(0, m.groupValues[1], m.groupValues[2]))
                     return
                 }
@@ -491,8 +554,8 @@ object PocketScriptInterpreter {
                             }
                         }
                     }
-                    assign(stmt.name, result)
-                    messages.add("${stmt.name} = ${ScriptExpression.format(result)}")
+                    val wroteGlobal = assign(stmt.name, result, stmt.declared, stmt.global)
+                    messages.add("${stmt.name} = ${ScriptExpression.format(result)}" + if (wroteGlobal) " (global – gilt in allen Projekten)" else "")
                 }
 
                 is Stmt.Print -> {
@@ -533,12 +596,21 @@ object PocketScriptInterpreter {
                 is Stmt.For -> executeFor(stmt)
 
                 is Stmt.Def -> {
-                    env.functions[stmt.function.name.lowercase()] = stmt.function
-                    messages.add("Funktion ${stmt.function.name}(${stmt.function.params.joinToString(", ")}) definiert")
+                    val key = stmt.function.name.lowercase()
+                    if (stmt.global) {
+                        env.globalFunctions[key] = stmt.function
+                        engine.persistGlobals()
+                    } else {
+                        env.functions[key] = stmt.function
+                    }
+                    messages.add(
+                        "Funktion ${stmt.function.name}(${stmt.function.params.joinToString(", ")}) definiert" +
+                            if (stmt.global) " (global – gilt in allen Projekten)" else "",
+                    )
                 }
 
                 is Stmt.Call -> {
-                    val fn = env.functions[stmt.name.lowercase()]
+                    val fn = env.function(stmt.name)
                         ?: throw ScriptError("Zeile ${stmt.line}: Funktion '${stmt.name}' ist nicht definiert.")
                     val args = splitArguments(stmt.args).map { valueOf(it) }
                     val formula = fn.formula
@@ -549,25 +621,45 @@ object PocketScriptInterpreter {
                     }
                 }
 
-                is Stmt.Vars -> if (stmt.clear) {
+                is Stmt.Vars -> if (stmt.clear && stmt.globals) {
+                    env.globals.clear()
+                    env.globalFunctions.clear()
+                    engine.persistGlobals()
+                    messages.add("Alle globalen Variablen und Funktionen gelöscht.")
+                } else if (stmt.clear) {
                     env.clear()
-                    messages.add("Alle Variablen und Funktionen gelöscht.")
+                    messages.add("Alle Variablen und Funktionen dieses Projekts gelöscht (globale bleiben: clear globals).")
                 } else {
                     val vars = env.variables.map { (k, v) -> "$k = ${ScriptExpression.format(v)}" }
-                    val fns = env.functions.values.map { "${it.name}(${it.params.joinToString(", ")})" }
+                    val globals = env.globals.map { (k, v) ->
+                        "global $k = ${ScriptExpression.format(v)}" + if (env.variables.containsKey(k)) " (im Projekt überdeckt)" else ""
+                    }
+                    val fns = env.functions.values.map { "def ${it.name}(${it.params.joinToString(", ")})" } +
+                        env.globalFunctions.values.map { "global def ${it.name}(${it.params.joinToString(", ")})" }
                     messages.add(
                         when {
-                            vars.isEmpty() && fns.isEmpty() ->
-                                "Noch keine Variablen. Beispiel: let x = 5 · Eingebaut: ${builtinVariables.keys.joinToString(", ") { "$$it" }}"
-                            else -> (vars + fns.map { "def $it" }).joinToString(" · ")
+                            vars.isEmpty() && globals.isEmpty() && fns.isEmpty() ->
+                                "Noch keine Variablen. Beispiel: let x = 5 (dieses Projekt) oder global x = 5 (alle Projekte) · Eingebaut: ${builtinVariables.keys.joinToString(", ") { "$$it" }}"
+                            else -> (vars + globals + fns).joinToString(" · ")
                         },
                     )
                 }
 
                 is Stmt.Unset -> {
                     val key = stmt.name.lowercase()
-                    val removed = env.variables.remove(key) != null || env.functions.remove(key) != null
-                    messages.add(if (removed) "'${stmt.name}' gelöscht." else "'${stmt.name}' gibt es nicht.")
+                    val removed = when {
+                        !stmt.global && (env.variables.remove(key) != null || env.functions.remove(key) != null) -> "'${stmt.name}' gelöscht."
+                        env.globals.remove(key) != null -> {
+                            engine.persistGlobals()
+                            "Globale Variable '${stmt.name}' gelöscht."
+                        }
+                        env.globalFunctions.remove(key) != null -> {
+                            engine.persistGlobals()
+                            "Globale Funktion '${stmt.name}' gelöscht."
+                        }
+                        else -> null
+                    }
+                    messages.add(removed ?: "'${stmt.name}' gibt es nicht.")
                 }
             }
         }
@@ -613,7 +705,8 @@ object PocketScriptInterpreter {
                     }
                 else -> {
                     // Liste: `for farbe in [rot, blau, gelb]` oder `for farbe in rot, blau, gelb`
-                    val list = splitArguments(source.removeSurrounding("[", "]"))
+                    // … oder eine gemerkte Liste: `let favoriten = [🚀, ⭐]` und dann `for e in $favoriten`
+                    val list = splitArguments(interpolate(source).trim().removeSurrounding("[", "]"))
                     if (list.isEmpty()) throw ScriptError("Zeile ${stmt.line}: Worüber soll 'for ${stmt.variable} in $source' laufen? (z.B. 1..5, captions, [a, b])")
                     list.map { mapOf(stmt.variable to valueOf(it)) }
                 }

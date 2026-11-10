@@ -211,6 +211,117 @@ class PocketScriptLanguageTest {
     }
 
     @Test
+    fun cropWithTimeRangeOnlyAppliesInsideThatRange() {
+        val e = engine()
+        e.executeCommand("0-2 u20%")
+        e.executeCommand("4-6 move 10%u")
+        assertEquals(0.80f, e.currentTransform(1_000L).cropBottom, 0.01f)
+        assertEquals(1.0f, e.currentTransform(3_000L).cropBottom, 0.01f)
+        assertEquals(-0.10f, e.currentTransform(5_000L).panY, 0.01f)
+        assertEquals(0f, e.currentTransform(1_000L).panY, 0.01f)
+        assertEquals(1.0f, e.project.transform.cropBottom, 0.01f)
+        assertEquals(0f, e.project.transform.panY, 0.01f)
+
+        // Ohne Zeitangabe oder mit all gilt es weiterhin fürs ganze Video
+        e.executeCommand("all u30%")
+        assertEquals(0.70f, e.project.transform.cropBottom, 0.01f)
+        e.executeCommand("o10%")
+        assertEquals(0.10f, e.project.transform.cropTop, 0.01f)
+    }
+
+    @Test
+    fun projectVariablesBelongToTheirProjectAndGlobalsToAll() {
+        val dir = java.nio.file.Files.createTempDirectory("pocketcraft-vars").toFile()
+        try {
+            val e = ProjectEngine().apply { projectStore = com.example.pocketcraft.engine.ProjectStore(dir) }
+            e.executeCommand("let tempo = 2,5")
+            e.executeCommand("global favoriten = [🚀, ⭐, 🎉]")
+            e.executeCommand("global zaehler = 1")
+            e.executeCommand("save Erstes")
+            val firstId = e.currentProjectId!!
+
+            // Neues Projekt: Projekt-Variable ist weg, globale sind da
+            e.executeCommand("new Zweites")
+            assertTrue(e.executeCommand("print \$tempo").contains("\$tempo"))
+            assertEquals("1", e.executeCommand("print \$zaehler"))
+            e.executeCommand("clear all")
+            e.executeCommand("let t = 0; for x in \$favoriten; \$t-{\$t + 1} set emoji: \$x; t += 1; end")
+            assertEquals(listOf("🚀", "⭐", "🎉"), e.project.overlays.filter { it.kind == OverlayKind.EMOJI }.map { it.content })
+
+            // Ohne let ändert eine Zuweisung die globale Variable, mit let überdeckt sie sie nur im Projekt
+            e.executeCommand("zaehler += 1")
+            e.executeCommand("let favoriten = nur hier")
+            e.executeCommand("save")
+
+            // Zurück im ersten Projekt gelten wieder dessen Variablen
+            e.openProject(firstId)
+            assertEquals("2.5", e.executeCommand("print \$tempo"))
+            assertEquals("2", e.executeCommand("print \$zaehler"))
+            assertEquals("[🚀, ⭐, 🎉]", e.executeCommand("print \$favoriten"))
+
+            // Nach einem Neustart sind Projekt- und globale Variablen noch da
+            val restarted = ProjectEngine().apply { projectStore = com.example.pocketcraft.engine.ProjectStore(dir) }
+            restarted.restoreLastSession()
+            assertEquals("2.5", restarted.executeCommand("print \$tempo"))
+            assertEquals("2", restarted.executeCommand("print \$zaehler"))
+            restarted.executeCommand("zoom \$tempo")
+            assertEquals(2.5f, restarted.project.transform.zoom, 0.001f)
+
+            assertTrue(restarted.executeCommand("vars").contains("global zaehler = 2"))
+            restarted.executeCommand("unset global zaehler")
+            restarted.executeCommand("clear vars")
+            val again = ProjectEngine().apply { projectStore = com.example.pocketcraft.engine.ProjectStore(dir) }
+            assertTrue(again.executeCommand("print \$zaehler").contains("\$zaehler"))
+            assertEquals("[🚀, ⭐, 🎉]", again.executeCommand("print \$favoriten"))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun functionsAreSavedPerProjectAndGlobally() {
+        val dir = java.nio.file.Files.createTempDirectory("pocketcraft-funcs").toFile()
+        try {
+            val e = ProjectEngine().apply { projectStore = com.example.pocketcraft.engine.ProjectStore(dir) }
+            e.executeCommand("def haelfte(x) = \$x / 2")
+            e.executeCommand("def marke(t)\n\$t-{\$t + 1} set emoji: ⭐\n{\$t + 1}-{\$t + 2} set emoji: 🎉\nend")
+            e.executeCommand("global def titel(text, farbe): 0-3 set text: \$text.\$farbe.big.top")
+            e.executeCommand("global def doppelt(x) = \$x * 2")
+            e.executeCommand("save Erstes")
+            val firstId = e.currentProjectId!!
+
+            // Anderes Projekt: nur die globalen Funktionen sind da
+            e.executeCommand("new Zweites")
+            e.executeCommand("clear all")
+            assertEquals("8", e.executeCommand("print {doppelt(4)}"))
+            e.executeCommand("titel(Hallo, gold)")
+            assertTrue(e.project.overlays.any { it.content == "Hallo" })
+            assertTrue(e.executeCommand("print {haelfte(4)}").contains("haelfte"))
+            e.executeCommand("save")
+
+            // Nach einem Neustart: Projekt-Funktionen (Formel und Block) und globale sind wieder da
+            val restarted = ProjectEngine().apply { projectStore = com.example.pocketcraft.engine.ProjectStore(dir) }
+            restarted.openProject(firstId)
+            restarted.executeCommand("clear all")
+            assertEquals("2", restarted.executeCommand("print {haelfte(4)}"))
+            restarted.executeCommand("marke(3)")
+            assertEquals(listOf(3_000L, 4_000L), restarted.emojiStarts())
+            assertEquals("8", restarted.executeCommand("print {doppelt(4)}"))
+            val listing = restarted.executeCommand("vars")
+            assertTrue(listing.contains("def haelfte(x)") && listing.contains("global def titel(text, farbe)"), listing)
+
+            restarted.executeCommand("unset global doppelt")
+            val again = ProjectEngine().apply { projectStore = com.example.pocketcraft.engine.ProjectStore(dir) }
+            assertTrue(again.executeCommand("print {doppelt(4)}").contains("doppelt"))
+            again.executeCommand("clear all")
+            again.executeCommand("titel(Noch da, cyan)")
+            assertTrue(again.project.overlays.any { it.content == "Noch da" })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun classicCommandsAndRulesStillBehaveAsBefore() {
         val e = engine()
         // Regel vor dem passenden Untertitel: wird wie bisher nach den Setup-Zeilen ausgewertet

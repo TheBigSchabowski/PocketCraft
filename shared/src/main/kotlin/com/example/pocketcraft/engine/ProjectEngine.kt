@@ -110,6 +110,12 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         set(value) {
             field = value
             refreshProjectList()
+            scriptEnv.globals.clear()
+            value?.loadGlobalVariables()?.forEach { (name, text) -> scriptEnv.globals[name] = ScriptEnvironment.decode(text) }
+            scriptEnv.globalFunctions.clear()
+            value?.loadGlobalFunctions()?.forEach { (name, source) ->
+                PocketScriptInterpreter.parseFunction(source, this)?.let { scriptEnv.globalFunctions[name] = it }
+            }
         }
 
     /** ID des aktuell geöffneten (bereits mindestens einmal gespeicherten) Projekts. */
@@ -366,6 +372,13 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         redoStack.clear()
         lastCoalesceKey = null
         project = newProject
+        // Variablen und Funktionen gehören zum Projekt: beim Wechsel die des neuen Projekts laden
+        scriptEnv.variables.clear()
+        newProject.variables.forEach { (name, text) -> scriptEnv.variables[name] = ScriptEnvironment.decode(text) }
+        scriptEnv.functions.clear()
+        newProject.functions.forEach { (name, source) ->
+            PocketScriptInterpreter.parseFunction(source, this)?.let { scriptEnv.functions[name] = it }
+        }
         playheadMs = newProject.resolvePlayablePosition(newProject.trimStartMs)
         selectedOverlayId = newProject.overlays.firstOrNull()?.id
     }
@@ -747,7 +760,24 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             return executeCommandInternal(rawInput)
         } finally {
             commandDepth--
+            if (commandDepth == 0) syncProjectVariables()
         }
+    }
+
+    /** Übernimmt Variablen und Funktionen ins Projekt, damit sie mitgespeichert werden (ohne Undo-Schritt). */
+    private fun syncProjectVariables() {
+        val variables = scriptEnv.variables.mapValues { ScriptExpression.format(it.value) }
+        val functions = scriptEnv.functions.mapValues { it.value.source }
+        if (variables != project.variables || functions != project.functions) {
+            project = project.copy(variables = variables, functions = functions)
+        }
+    }
+
+    /** Schreibt globale Variablen und Funktionen (`global x = 5`, `global def …`) in den Projektspeicher. */
+    fun persistGlobals() {
+        val store = projectStore ?: return
+        store.saveGlobalVariables(scriptEnv.globals.mapValues { ScriptExpression.format(it.value) })
+        store.saveGlobalFunctions(scriptEnv.globalFunctions.mapValues { it.value.source })
     }
 
     private fun executeCommandInternal(rawInput: String): String {
@@ -1103,7 +1133,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 }
             }
             "help", "?" -> {
-                resultMessage = "Vorführung: demo · Programmieren: let x = 5, zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
+                resultMessage = "Vorführung: demo · Programmieren: let x = 5 (Projekt), global x = 5 / global def … (alle Projekte), zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
             }
 
             else -> {

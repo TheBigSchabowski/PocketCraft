@@ -2,6 +2,8 @@ package com.example.pocketcraft.engine
 
 import com.example.pocketcraft.model.VideoProject
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -86,6 +88,46 @@ class ProjectStore(private val dir: File) {
         if (lastOpenedId() == id) lastOpenedFile.delete()
         return fileFor(id).delete()
     }
+
+    private val globalVariablesFile: File get() = File(dir, "globals.vars")
+
+    /** Globale PocketScript-Variablen (`global x = 5`), die in allen Projekten gelten. */
+    fun loadGlobalVariables(): Map<String, String> = try {
+        globalVariablesFile.takeIf { it.exists() }
+            ?.let { json.decodeFromString(variablesSerializer, it.readText()) }
+            ?: emptyMap()
+    } catch (_: Exception) {
+        emptyMap()
+    }
+
+    fun saveGlobalVariables(variables: Map<String, String>) {
+        try {
+            dir.mkdirs()
+            globalVariablesFile.writeText(json.encodeToString(variablesSerializer, variables))
+        } catch (_: Exception) {
+        }
+    }
+
+    private val globalFunctionsFile: File get() = File(dir, "globals.funcs")
+
+    /** Globale PocketScript-Funktionen (`global def name(a): …`), Name → Definition als Text. */
+    fun loadGlobalFunctions(): Map<String, String> = try {
+        globalFunctionsFile.takeIf { it.exists() }
+            ?.let { json.decodeFromString(variablesSerializer, it.readText()) }
+            ?: emptyMap()
+    } catch (_: Exception) {
+        emptyMap()
+    }
+
+    fun saveGlobalFunctions(functions: Map<String, String>) {
+        try {
+            dir.mkdirs()
+            globalFunctionsFile.writeText(json.encodeToString(variablesSerializer, functions))
+        } catch (_: Exception) {
+        }
+    }
+
+    private val variablesSerializer = MapSerializer(String.serializer(), String.serializer())
 
     fun lastOpenedId(): String? = try {
         lastOpenedFile.takeIf { it.exists() }?.readText()?.trim()?.ifEmpty { null }
