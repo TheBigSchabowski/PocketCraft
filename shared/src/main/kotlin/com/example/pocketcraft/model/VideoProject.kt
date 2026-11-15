@@ -35,6 +35,11 @@ data class VideoProject(
     /** PocketScript-Funktionen dieses Projekts (`def name(a): …`), Name → Definition als Text. */
     val functions: Map<String, String> = emptyMap(),
     val activeFontId: String = BuiltInFont.SANS_BOLD.id,
+    /**
+     * Befehlsverlauf dieses Projekts (`show edits`): jede Konsolen-Eingabe, die das Projekt geändert hat,
+     * in der Reihenfolge der Ausführung. Wird nur angehängt – `undo` nimmt hier nichts zurück.
+     */
+    val commandLog: List<String> = emptyList(),
 ) {
     /** Effektive Länge des geschnittenen Clips in Millisekunden. */
     val trimmedDurationMs: Long

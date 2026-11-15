@@ -627,7 +627,7 @@ private fun TextAndFontManagerToolView(
             }
         }
 
-        // Falls ein Overlay ausgewählt ist: Größe & Löschen anbieten
+        // Falls ein Overlay ausgewählt ist: Größe, Bearbeiten & Löschen anbieten
         val selectedOverlay = p.overlays.firstOrNull { it.id == engine.selectedOverlayId }
         if (selectedOverlay != null) {
             Row(
@@ -643,6 +643,11 @@ private fun TextAndFontManagerToolView(
                         onValueChange = { engine.scaleOverlay(selectedOverlay.id, it) },
                     )
                 }
+                SmallActionChip(
+                    label = "✏️ Bearbeiten",
+                    active = true,
+                    onClick = { engine.editingOverlayId = selectedOverlay.id },
+                )
                 SmallActionChip(
                     label = "🗑️ Löschen",
                     active = false,

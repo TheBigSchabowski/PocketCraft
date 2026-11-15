@@ -192,20 +192,24 @@ class DesktopFrameRenderer(
     private fun drawOverlay(ov: CanvasOverlay) {
         val pad = 4 * dp
         val isText = ov.kind == OverlayKind.TEXT
+        val innerX = if (isText) 10 * dp else 0f
+        val innerY = if (isText) 5 * dp else 0f
+        // Wie die Vorschau: lange Texte brechen um, damit die Box (samt Skalierung) ins Bild passt
+        val maxTextW = (ExportLayout.overlayMaxBoxWidth(w, ov.scale) - 2 * (pad + innerX)).coerceAtLeast(10f)
         val paragraph = if (isText) {
-            paragraph(ov.content, ov.fontId, 16 * dp, ov.colorArgb, bold = true, maxWidth = 100_000f, centered = false)
+            paragraph(ov.content, ov.fontId, 16 * dp, ov.colorArgb, bold = true, maxWidth = maxTextW, centered = true)
         } else {
-            paragraph(ov.content, null, 36 * dp, 0xFFFFFFFF, bold = false, maxWidth = 100_000f, centered = false)
+            paragraph(ov.content, null, 36 * dp, 0xFFFFFFFF, bold = false, maxWidth = maxTextW, centered = true)
         }
         paragraph.use { p ->
-            val textW = p.longestLine
-            val boxW = textW + (if (isText) 20 * dp else 0f) + pad * 2
-            val boxH = p.height + (if (isText) 10 * dp else 0f) + pad * 2
-            // Vorschau: obere linke Ecke bei (x - 60dp, y - 24dp), skaliert/gedreht um die Box-Mitte
-            val left = ov.xPercent * w - 60 * dp
-            val top = ov.yPercent * h - 24 * dp
-            val cx = left + boxW / 2f
-            val cy = top + boxH / 2f
+            val lineW = p.longestLine
+            val boxW = lineW + 2 * (pad + innerX)
+            val boxH = p.height + 2 * (pad + innerY)
+            // Vorschau: die Box sitzt mit ihrer Mitte auf (x, y) und wird um diese Mitte skaliert/gedreht
+            val cx = ov.xPercent * w
+            val cy = ov.yPercent * h
+            val left = cx - boxW / 2f
+            val top = cy - boxH / 2f
             canvas.save()
             canvas.rotate(ov.rotationDegrees, cx, cy)
             canvas.scale(ov.scale, ov.scale, cx, cy)
@@ -213,10 +217,8 @@ class DesktopFrameRenderer(
                 Paint().apply { color = ov.backgroundArgb.toInt() }.use { bg ->
                     canvas.drawRRect(RRect.makeLTRB(left + pad, top + pad, left + boxW - pad, top + boxH - pad, 8 * dp), bg)
                 }
-                p.paint(canvas, left + pad + 10 * dp, top + pad + 5 * dp)
-            } else {
-                p.paint(canvas, left + pad, top + pad)
             }
+            p.paint(canvas, left + pad + innerX - (maxTextW - lineW) / 2f, top + pad + innerY)
             canvas.restore()
         }
     }

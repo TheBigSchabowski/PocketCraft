@@ -448,46 +448,45 @@ internal class ExportOverlayRenderer(
     }
 
     private fun drawOverlay(canvas: Canvas, ov: com.example.pocketcraft.model.CanvasOverlay) {
+        val isText = ov.kind == OverlayKind.TEXT
         val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
-        val pad = 4 * dp
-        val boxW: Float
-        val boxH: Float
-        when (ov.kind) {
-            OverlayKind.EMOJI -> {
-                textPaint.textSize = 36 * dp
-                val fm = textPaint.fontMetrics
-                boxW = textPaint.measureText(ov.content) + pad * 2
-                boxH = (fm.descent - fm.ascent) + pad * 2
-            }
-            OverlayKind.TEXT -> {
-                textPaint.typeface = FontRegistry.resolveAndroidTypeface(ov.fontId, project.customFonts)
-                textPaint.isFakeBoldText = true
-                textPaint.textSize = 16 * dp
-                val fm = textPaint.fontMetrics
-                boxW = textPaint.measureText(ov.content) + 20 * dp + pad * 2
-                boxH = (fm.descent - fm.ascent) + 10 * dp + pad * 2
-            }
+        if (isText) {
+            textPaint.typeface = FontRegistry.resolveAndroidTypeface(ov.fontId, project.customFonts)
+            textPaint.isFakeBoldText = true
+            textPaint.textSize = 16 * dp
+            textPaint.color = ov.colorArgb.toInt()
+        } else {
+            textPaint.textSize = 36 * dp
         }
-        // Vorschau: obere linke Ecke bei (x - 60dp, y - 24dp), skaliert/gedreht um die Box-Mitte
-        val left = ov.xPercent * w - 60 * dp
-        val top = ov.yPercent * h - 24 * dp
-        val cx = left + boxW / 2f
-        val cy = top + boxH / 2f
+        val pad = 4 * dp
+        val innerX = if (isText) 10 * dp else 0f
+        val innerY = if (isText) 5 * dp else 0f
+
+        // Wie die Vorschau: lange Texte brechen um, damit die Box (samt Skalierung) ins Bild passt
+        val maxTextW = (ExportLayout.overlayMaxBoxWidth(w, ov.scale) - 2 * (pad + innerX)).roundToInt().coerceAtLeast(10)
+        val layout = StaticLayout.Builder.obtain(ov.content, 0, ov.content.length, textPaint, maxTextW)
+            .setAlignment(Layout.Alignment.ALIGN_CENTER)
+            .setIncludePad(false)
+            .build()
+        var lineW = 0f
+        for (i in 0 until layout.lineCount) lineW = maxOf(lineW, layout.getLineWidth(i))
+        val boxW = lineW + 2 * (pad + innerX)
+        val boxH = layout.height + 2 * (pad + innerY)
+
+        // Vorschau: die Box sitzt mit ihrer Mitte auf (x, y) und wird um diese Mitte skaliert/gedreht
+        val cx = ov.xPercent * w
+        val cy = ov.yPercent * h
+        val left = cx - boxW / 2f
+        val top = cy - boxH / 2f
         canvas.save()
         canvas.rotate(ov.rotationDegrees, cx, cy)
         canvas.scale(ov.scale, ov.scale, cx, cy)
-        val fm = textPaint.fontMetrics
-        when (ov.kind) {
-            OverlayKind.EMOJI -> {
-                canvas.drawText(ov.content, left + pad, top + pad - fm.ascent, textPaint)
-            }
-            OverlayKind.TEXT -> {
-                val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ov.backgroundArgb.toInt() }
-                canvas.drawRoundRect(RectF(left + pad, top + pad, left + boxW - pad, top + boxH - pad), 8 * dp, 8 * dp, bg)
-                textPaint.color = ov.colorArgb.toInt()
-                canvas.drawText(ov.content, left + pad + 10 * dp, top + pad + 5 * dp - fm.ascent, textPaint)
-            }
+        if (isText) {
+            val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ov.backgroundArgb.toInt() }
+            canvas.drawRoundRect(RectF(left + pad, top + pad, left + boxW - pad, top + boxH - pad), 8 * dp, 8 * dp, bg)
         }
+        canvas.translate(left + pad + innerX - (maxTextW - lineW) / 2f, top + pad + innerY)
+        layout.draw(canvas)
         canvas.restore()
     }
 

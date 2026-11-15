@@ -213,7 +213,7 @@ fun ProjectsDialog(
 }
 
 @Composable
-private fun DialogChip(
+internal fun DialogChip(
     label: String,
     highlight: Boolean = false,
     danger: Boolean = false,

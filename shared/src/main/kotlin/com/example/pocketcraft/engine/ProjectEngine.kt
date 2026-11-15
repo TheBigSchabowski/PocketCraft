@@ -84,6 +84,9 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     /** Aktuell ausgewähltes Overlay auf dem Canvas (zum Verschieben/Bearbeiten). */
     var selectedOverlayId by mutableStateOf<String?>(initialProject.overlays.firstOrNull()?.id)
 
+    /** Overlay, dessen Text gerade im Bearbeiten-Dialog offen ist (Antippen eines ausgewählten Elements). */
+    var editingOverlayId by mutableStateOf<String?>(null)
+
     /** Status-Indikator für die On-Device Auto-Caption Spracherkennung (Pixel 9 SpeechRecognizer). */
     var isListeningForCaptions by mutableStateOf(false)
 
@@ -127,6 +130,12 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
 
     /** Ob der Projekte-Dialog gerade offen ist. */
     var isProjectsDialogOpen by mutableStateOf(false)
+
+    /** Ob der Befehlsverlauf (`show edits`) gerade als Dialog offen ist. */
+    var isEditsDialogOpen by mutableStateOf(false)
+
+    /** Zählt Projektwechsel (Öffnen/Neu), damit ein Befehl nicht im Verlauf des falschen Projekts landet. */
+    private var projectGeneration = 0
 
     /** Liste aller gespeicherten Projekte (neueste zuerst). */
     val savedProjects = mutableStateListOf<ProjectSummary>()
@@ -182,6 +191,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         if (next.videoUri != null && next.videoUri == project.videoUri && next.sourceDurationMs != project.sourceDurationMs) {
             next = next.clampedToDuration(project.sourceDurationMs)
         }
+        // Der Befehlsverlauf gehört nicht zum Bearbeitungsstand: `reset` & Co. dürfen ihn nicht leeren
+        if (next.commandLog != project.commandLog) next = next.copy(commandLog = project.commandLog)
         if (next == project) return
 
         // Schnelle Folge-Änderungen derselben Geste (Slider ziehen, Pinch-Zoom, Overlay ziehen)
@@ -371,6 +382,9 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         undoStack.clear()
         redoStack.clear()
         lastCoalesceKey = null
+        projectGeneration++
+        isEditsDialogOpen = false
+        editingOverlayId = null
         project = newProject
         // Variablen und Funktionen gehören zum Projekt: beim Wechsel die des neuen Projekts laden
         scriptEnv.variables.clear()
@@ -394,7 +408,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         }
         val snapshot = undoStack.removeAt(undoStack.lastIndex)
         redoStack.add(HistorySnapshot(description = snapshot.description, state = project))
-        project = snapshot.state
+        project = snapshot.state.copy(commandLog = project.commandLog)
         lastCoalesceKey = null
         clampPlayhead()
         return "Rückgängig gemacht: ${snapshot.description}"
@@ -409,7 +423,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         }
         val snapshot = redoStack.removeAt(redoStack.lastIndex)
         undoStack.add(HistorySnapshot(description = snapshot.description, state = project))
-        project = snapshot.state
+        project = snapshot.state.copy(commandLog = project.commandLog)
         lastCoalesceKey = null
         clampPlayhead()
         return "Wiederhergestellt: ${snapshot.description}"
@@ -619,6 +633,16 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         }
     }
 
+    /** Ändert den Inhalt eines vorhandenen Text- oder Emoji-Overlays (Bearbeiten-Dialog). */
+    fun updateOverlayContent(id: String, newContent: String) {
+        val clean = newContent.trim()
+        val target = project.overlays.firstOrNull { it.id == id } ?: return
+        if (clean.isEmpty() || clean == target.content) return
+        commitChange("Text geändert: \"$clean\"") { p ->
+            p.copy(overlays = p.overlays.map { if (it.id == id) it.copy(content = clean) else it })
+        }
+    }
+
     fun removeOverlay(id: String) {
         val target = project.overlays.firstOrNull { it.id == id } ?: return
         commitChange("Overlay '${target.content}' gelöscht") { p ->
@@ -627,6 +651,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         if (selectedOverlayId == id) {
             selectedOverlayId = project.overlays.firstOrNull()?.id
         }
+        if (editingOverlayId == id) editingOverlayId = null
     }
 
     fun selectFont(fontId: String) {
@@ -755,13 +780,57 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
      * `trim 2 12`, `filter cyberpunk`, `blur bokeh 20`, `text Hallo Welt`, `emoji 🔥`, `autocaption`, `reset`.
      */
     fun executeCommand(rawInput: String): String {
+        val before = project
+        val generationBefore = projectGeneration
         commandDepth++
         try {
             return executeCommandInternal(rawInput)
         } finally {
             commandDepth--
-            if (commandDepth == 0) syncProjectVariables()
+            if (commandDepth == 0) {
+                syncProjectVariables()
+                recordInCommandLog(rawInput, before, generationBefore)
+            }
         }
+    }
+
+    /**
+     * Hängt eine Konsolen-Eingabe an den Befehlsverlauf des Projekts an – aber nur, wenn sie das Projekt
+     * geändert hat (reine Anzeige-Befehle wie `texts` oder `help` bleiben draußen) und nicht gerade
+     * das Projekt gewechselt wurde (`open`, `new`).
+     */
+    private fun recordInCommandLog(rawInput: String, before: VideoProject, generationBefore: Int) {
+        val command = rawInput.trim()
+        if (command.isEmpty() || projectGeneration != generationBefore) return
+        if (project.copy(commandLog = before.commandLog) == before) return
+        // Endet der Befehl mit einem gespeicherten Stand (`save`, Skript mit `save` am Ende), soll der
+        // Verlaufs-Eintrag das Projekt nicht gleich wieder als "ungespeichert" markieren.
+        val wasSaved = lastSavedProject == project
+        project = project.copy(commandLog = (project.commandLog + command).takeLast(MAX_COMMAND_LOG))
+        val id = currentProjectId
+        val store = projectStore
+        if (wasSaved && id != null && store != null && runCatching { store.save(id, project) }.isSuccess) {
+            lastSavedProject = project
+        }
+    }
+
+    /** `show edits`: alle Befehle, die dieses Projekt bisher geändert haben. */
+    private fun showEdits(): String {
+        val log = project.commandLog
+        if (log.isEmpty()) return "Noch keine Befehle in diesem Projekt aufgezeichnet."
+        isEditsDialogOpen = true
+        val noun = if (log.size == 1) "Befehl" else "Befehle"
+        return "${log.size} $noun in diesem Projekt: " +
+            log.mapIndexed { i, cmd -> "${i + 1}. ${cmd.lines().joinToString("; ") { it.trim() }}" }.joinToString(" · ")
+    }
+
+    /** `clear edits`: leert den Befehlsverlauf (das Video selbst bleibt, wie es ist). */
+    private fun clearEdits(): String {
+        val n = project.commandLog.size
+        if (n == 0) return "Der Befehlsverlauf ist schon leer."
+        project = project.copy(commandLog = emptyList())
+        isEditsDialogOpen = false
+        return "Befehlsverlauf geleert ($n Einträge) – das Video bleibt unverändert."
     }
 
     /** Übernimmt Variablen und Funktionen ins Projekt, damit sie mitgespeichert werden (ohne Undo-Schritt). */
@@ -806,7 +875,13 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val resultMessage: String
         var isError = false
 
-        when (verb) {
+        // Vorhandene Texte/Emojis ändern: `move text1 10%u`, `edit text1: Neu`, `size text1 150`, `texts`
+        val overlayResult = OverlayCommands.tryExecute(verb, trimmed.drop(tokens.first().length), this)
+
+        if (overlayResult != null) {
+            resultMessage = overlayResult.first
+            isError = overlayResult.second
+        } else when (verb) {
             "pdf", "manual", "anleitung", "handbuch" -> {
                 isPdfManualOpen = true
                 resultMessage = "PocketScript PDF-Anleitung geöffnet."
@@ -1094,6 +1169,19 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 }
             }
 
+            "show", "zeig" -> {
+                if (args.joinToString(" ").lowercase() in editsWords) {
+                    resultMessage = showEdits()
+                } else {
+                    isError = true
+                    resultMessage = "Syntax: show edits – zeigt alle Befehle, die dieses Projekt bisher geändert haben."
+                }
+            }
+
+            "edits", "history", "verlauf" -> {
+                resultMessage = showEdits()
+            }
+
             "captions", "subs", "list" -> {
                 val subs = project.subtitles.sortedBy { it.startMs }
                 resultMessage = if (subs.isEmpty()) {
@@ -1133,7 +1221,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 }
             }
             "help", "?" -> {
-                resultMessage = "Vorführung: demo · Programmieren: let x = 5 (Projekt), global x = 5 / global def … (alle Projekte), zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
+                resultMessage = "Vorführung: demo · Programmieren: let x = 5 (Projekt), global x = 5 / global def … (alle Projekte), zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Verlauf: show edits (alle Befehle dieses Projekts), clear edits · Text/Emoji ändern: texts (Liste), move text1 10%u | 10%l | 10%r | 10%left | 50 20 | top, edit text1: Neuer Text, size text1 150 · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
             }
 
             else -> {
@@ -1164,6 +1252,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
      */
     private fun clearElements(rawTarget: String): Pair<String, Boolean> {
         val target = rawTarget.trim().lowercase().removeSuffix(".")
+        if (target.removePrefix("all ").removePrefix("alle ") in editsWords) return clearEdits() to false
         if (target == "all" || target == "alles" || target == "alle") {
             if (project.subtitles.isEmpty() && project.overlays.isEmpty()) {
                 return "Keine Untertitel, Texte oder Emojis vorhanden." to false
@@ -1171,11 +1260,12 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             val n = project.subtitles.size + project.overlays.size
             commitChange("Alle Untertitel, Texte & Emojis gelöscht") { it.copy(subtitles = emptyList(), overlays = emptyList()) }
             selectedOverlayId = null
+            editingOverlayId = null
             return "$n Elemente gelöscht (alle Untertitel, Texte & Emojis)." to false
         }
 
         val m = Regex(
-            """^(?:(?:all|alle)\s+(?:the\s+|die\s+)?)?(captions?|subs?|subtitles?|untertitel|texts?|titles?|titel|texte|emojis?|stickers?|overlays?|cuts?|schnitte?|cutmarker)\s*(.*)$""",
+            """^(?:(?:all|alle)\s+(?:the\s+|die\s+)?)?(captions?|subs?|subtitles?|untertitel|texte?s?|titles?|titel|emojis?|stickers?|overlays?|cuts?|schnitte?|cutmarker)(?:[\s-]*overlays?\b)?\s*(.*)$""",
         ).matchEntire(target) ?: return "Was soll gelöscht werden? z.B. 'clear all captions', 'clear caption1', 'clear texts', 'clear emoji1', 'clear cuts'." to true
 
         val kindToken = m.groupValues[1]
@@ -1235,7 +1325,12 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 val ids = toRemove.map { it.id }.toSet()
                 commitChange("${toRemove.size} $label gelöscht") { p -> p.copy(overlays = p.overlays.filterNot { it.id in ids }) }
                 if (selectedOverlayId in ids) selectedOverlayId = project.overlays.firstOrNull()?.id
-                return (if (toRemove.size == 1) "'${toRemove.first().content}' gelöscht." else "${toRemove.size} $label gelöscht.") to false
+                if (editingOverlayId in ids) editingOverlayId = null
+                return when {
+                    isAll && toRemove.size > 1 -> "Alle ${toRemove.size} $label gelöscht."
+                    toRemove.size == 1 -> "'${toRemove.first().content}' gelöscht."
+                    else -> "${toRemove.size} $label gelöscht."
+                } to false
             }
         }
     }
@@ -1265,6 +1360,11 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     }
 
     companion object {
+        /** So viele Einträge behält der Befehlsverlauf eines Projekts höchstens (älteste fallen weg). */
+        const val MAX_COMMAND_LOG = 500
+
+        private val editsWords = setOf("edits", "history", "verlauf", "commands", "befehle")
+
         /** Stellt sicher, dass alle Zeitwerte innerhalb der Videolänge [durationMs] liegen. */
         internal fun VideoProject.clampedToDuration(durationMs: Long): VideoProject {
             val d = durationMs.coerceAtLeast(500L)

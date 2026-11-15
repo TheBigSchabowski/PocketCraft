@@ -1399,7 +1399,7 @@ object PocketScriptPdfManualGenerator {
                 "clear all captions" to "Löscht alle Untertitel.",
                 "clear caption1" to "Löscht den ersten Untertitel (nach Startzeit, 'captions' zeigt die Liste).",
                 "clear caption Hallo" to "Löscht alle Untertitel, die 'Hallo' enthalten.",
-                "clear texts" to "Löscht alle Text-Overlays (clear text2 = nur den zweiten).",
+                "clear all texts" to "Löscht alle Text-Overlays (clear text2 = nur den zweiten, 'texts' zeigt die Liste).",
                 "clear emojis" to "Löscht alle Emojis (clear emoji1 = nur das erste).",
                 "clear cuts" to "Entfernt alle Schnittmarken und herausgeschnittenen Bereiche.",
                 "clear all" to "Löscht alle Untertitel, Texte und Emojis auf einmal.",
@@ -1415,6 +1415,7 @@ object PocketScriptPdfManualGenerator {
                 "open Urlaub" to "Öffnet das Projekt mit diesem Namen (oder 'open 1' für das neueste).",
                 "new Mein Reel" to "Legt ein neues, leeres Projekt an.",
                 "export" to "Exportiert das Projekt (wie die Export-Taste).",
+                "show edits" to "Zeigt alle Befehle, die dieses Projekt bisher geändert haben – zum Nachlesen, Kopieren oder erneut Ausführen (clear edits leert die Liste).",
             ),
         ),
         ManualSection(
@@ -1491,6 +1492,19 @@ object PocketScriptPdfManualGenerator {
                 "2-6 set caption: Mega Clip!.yellow.big" to "Großer gelber Untertitel von Sekunde 2 bis 6.",
                 "0-12 set text: PIXEL 9.cyan.mono.top" to "Text-Overlay oben in Cyan mit Monospace-Schrift.",
                 "4-9 set emoji: 🔥.huge" to "Setzt ein extra großes Feuer-Emoji von Sekunde 4 bis 9.",
+            ),
+        ),
+        ManualSection(
+            title = "6a. Texte & Emojis nachträglich verschieben und ändern (move, edit, size)",
+            codeExamples = listOf(
+                "texts" to "Listet alle Text-Overlays mit Nummer, Zeit, Position und Größe (emojis für Emojis).",
+                "move text1 10%u" to "Schiebt text1 um 10 % nach oben (10%l runter, 10%r rechts, 10%left links; auch: move text1 up 10).",
+                "move text1 50 20" to "Setzt die Mitte von text1 auf 50 % von links und 20 % von oben.",
+                "move text1 top" to "Feste Plätze: top, center, bottom (ohne Nummer: move text … nimmt den ausgewählten Text).",
+                "edit text1: Neuer Text" to "Ersetzt den Inhalt von text1 – lange Texte brechen automatisch um.",
+                "edit text1: Neuer Text.gold.big" to "Neuer Inhalt samt Stil; nur den Stil ändern: edit text1: .gold.serif",
+                "size text1 150" to "Größe in Prozent (auch size text1 big, small, huge oder size text1 +20).",
+                "move emoji1 80 15" to "Alles funktioniert genauso für Emojis – oder direkt im Video: ziehen zum Verschieben, antippen zum Bearbeiten.",
             ),
         ),
         ManualSection(

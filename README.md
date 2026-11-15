@@ -14,6 +14,8 @@ titel(Mein Urlaub, gold)                    # eigene Funktion
 if $duration > 30: delete after 00:30       # Bedingung
 if caption red: u20%, move 10%u, zoom 1,5   # gilt nur, solange der rote Untertitel läuft
 global favoriten = [🚀, ⭐, 🎉]              # global: gilt in allen Projekten (let: nur in diesem)
+move text1 10%u                             # vorhandenen Text verschieben (auch: move text1 50 20)
+edit text1: Schönen Abend!.gold             # Text und Stil nachträglich ändern, size text1 150 für die Größe
 ```
 
 Zum Ausprobieren: Video laden und `demo` tippen – PocketCraft baut daraus einen Clip, der jede Funktion

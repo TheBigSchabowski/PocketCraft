@@ -25,14 +25,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,18 +54,24 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.pocketcraft.engine.ExportLayout
 import com.example.pocketcraft.engine.ProjectEngine
 import com.example.pocketcraft.model.BlurMode
 import com.example.pocketcraft.model.BuiltInFont
+import com.example.pocketcraft.model.CanvasOverlay
 import com.example.pocketcraft.model.CustomFontEntry
 import com.example.pocketcraft.model.FilterConfig
 import com.example.pocketcraft.model.OverlayKind
@@ -551,72 +560,27 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             }
         }
 
-        // 4. Frei verschiebbare Text- & Emoji-Overlays auf dem Video
+        // 4. Text- & Emoji-Overlays: ziehen = verschieben, antippen = auswählen, ausgewähltes antippen = bearbeiten.
+        //    Alle Maße beziehen sich (wie im Export) auf die Referenz-Bühne: ein Overlay sieht in der kleinen
+        //    Vorschau (Tastatur offen), in der großen Vorschau und im fertigen Video gleich aus.
+        val stageDensity = remember(canvasWidthPx, activeAspect) {
+            Density(density = canvasWidthPx / ExportLayout.referenceWidthDp(activeAspect), fontScale = 1f)
+        }
+        val overlayLayoutDensity = remember(density.density) { Density(density = density.density, fontScale = 1f) }
         project.overlays.forEach { overlay ->
             if (engine.playheadMs in overlay.startMs..overlay.endMs) {
-                val isSelected = engine.selectedOverlayId == overlay.id
-                val fontFamily = rememberComposeFontFamily(overlay.fontId, project.customFonts)
-                val xPx = overlay.xPercent * canvasWidthPx
-                val yPx = overlay.yPercent * canvasHeightPx
-
-                Box(
-                    modifier = Modifier
-                        .offset {
-                            IntOffset(
-                                (xPx - 60.dp.toPx()).roundToInt(),
-                                (yPx - 24.dp.toPx()).roundToInt(),
-                            )
-                        }
-                        .graphicsLayer {
-                            scaleX = overlay.scale
-                            scaleY = overlay.scale
-                            rotationZ = overlay.rotationDegrees
-                        }
-                        .clip(RoundedCornerShape(10.dp))
-                        .then(
-                            if (isSelected) {
-                                Modifier.border(1.5.dp, Color(0xFFFFD600), RoundedCornerShape(10.dp))
-                            } else {
-                                Modifier
-                            },
-                        )
-                        .clickable { engine.selectedOverlayId = overlay.id }
-                        .pointerInput(overlay.id, overlay.xPercent, overlay.yPercent) {
-                            detectDragGestures { change, dragAmount ->
-                                change.consume()
-                                engine.selectedOverlayId = overlay.id
-                                val nextX = (overlay.xPercent + dragAmount.x / canvasWidthPx).coerceIn(0.08f, 0.92f)
-                                val nextY = (overlay.yPercent + dragAmount.y / canvasHeightPx).coerceIn(0.08f, 0.92f)
-                                engine.moveOverlay(overlay.id, nextX, nextY)
-                            }
-                        }
-                        .padding(4.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    when (overlay.kind) {
-                        OverlayKind.EMOJI -> {
-                            Text(
-                                text = overlay.content,
-                                fontSize = 36.sp,
-                            )
-                        }
-                        OverlayKind.TEXT -> {
-                            Surface(
-                                color = Color(overlay.backgroundArgb),
-                                shape = RoundedCornerShape(8.dp),
-                            ) {
-                                Text(
-                                    text = overlay.content,
-                                    color = Color(overlay.colorArgb),
-                                    fontFamily = fontFamily,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontStyle = if (overlay.fontId == BuiltInFont.SERIF_CINEMA.id) FontStyle.Italic else FontStyle.Normal,
-                                    fontSize = 16.sp,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                )
-                            }
-                        }
-                    }
+                key(overlay.id) {
+                    CanvasOverlayItem(
+                        engine = engine,
+                        overlay = overlay,
+                        customFonts = project.customFonts,
+                        canvasWidthPx = canvasWidthPx,
+                        canvasHeightPx = canvasHeightPx,
+                        // Einmal in fester Größe setzen und dann als Ganzes skalieren: so bricht der Text in der
+                        // kleinen Vorschau exakt an denselben Stellen um wie in der großen.
+                        layoutDensity = overlayLayoutDensity,
+                        stageScale = stageDensity.density / overlayLayoutDensity.density,
+                    )
                 }
             }
         }
@@ -630,6 +594,11 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             val words = activeSub.text.split(" ")
             val activeWordIdx = (progress * words.size).toInt().coerceIn(0, (words.size - 1).coerceAtLeast(0))
 
+            // Untertitel in denselben Maßen wie im Export (unabhängig von Vorschaugröße und System-Schriftgröße)
+            CompositionLocalProvider(
+                LocalDensity provides stageDensity,
+                LocalTextStyle provides TextStyle.Default,
+            ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -660,6 +629,128 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                     }
                 }
             }
+            }
+        }
+    }
+}
+
+/**
+ * Ein Text- oder Emoji-Overlay auf der Vorschau. Die Box sitzt mit ihrer **Mitte** auf
+ * (`xPercent`, `yPercent`), lange Texte brechen um, damit sie ins Bild passen – genau so
+ * zeichnen es auch die Exporter (Android und Desktop).
+ */
+@Composable
+private fun CanvasOverlayItem(
+    engine: ProjectEngine,
+    overlay: CanvasOverlay,
+    customFonts: List<CustomFontEntry>,
+    canvasWidthPx: Float,
+    canvasHeightPx: Float,
+    layoutDensity: Density,
+    stageScale: Float,
+) {
+    val isSelected = engine.selectedOverlayId == overlay.id
+    val fontFamily = rememberComposeFontFamily(overlay.fontId, customFonts)
+    // Die Gesten laufen über viele Bilder hinweg: immer mit dem aktuellen Stand rechnen,
+    // ohne die Geste bei jeder Bewegung neu zu starten (sonst bricht das Ziehen sofort ab).
+    val latestOverlay by rememberUpdatedState(overlay)
+    val latestWidth by rememberUpdatedState(canvasWidthPx)
+    val latestHeight by rememberUpdatedState(canvasHeightPx)
+    val latestStageScale by rememberUpdatedState(stageScale)
+    // Breite vor dem Skalieren (Overlay-Größe × Vorschau-Maßstab), ab der der Text umbricht
+    val maxBoxWidthPx = (ExportLayout.overlayMaxBoxWidth(canvasWidthPx, overlay.scale) / stageScale).roundToInt().coerceAtLeast(1)
+    val centerX = overlay.xPercent * canvasWidthPx
+    val centerY = overlay.yPercent * canvasHeightPx
+
+    Layout(
+        modifier = Modifier.fillMaxSize(),
+        content = {
+            CompositionLocalProvider(
+                LocalDensity provides layoutDensity,
+                LocalTextStyle provides TextStyle.Default,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .graphicsLayer {
+                            scaleX = overlay.scale * stageScale
+                            scaleY = overlay.scale * stageScale
+                            rotationZ = overlay.rotationDegrees
+                        }
+                        .clip(RoundedCornerShape(10.dp))
+                        .then(
+                            if (isSelected) {
+                                Modifier.border(1.5.dp, Color(0xFFFFD600), RoundedCornerShape(10.dp))
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .pointerInput(overlay.id) {
+                            detectTapGestures(
+                                onTap = {
+                                    if (engine.selectedOverlayId == overlay.id) {
+                                        engine.editingOverlayId = overlay.id
+                                    } else {
+                                        engine.selectedOverlayId = overlay.id
+                                    }
+                                },
+                            )
+                        }
+                        .pointerInput(overlay.id) {
+                            detectDragGestures(
+                                onDragStart = { engine.selectedOverlayId = overlay.id },
+                            ) { change, dragAmount ->
+                                change.consume()
+                                // Die Bewegung kommt im gedrehten/skalierten Koordinatensystem der Box an
+                                val current = latestOverlay
+                                val angle = Math.toRadians(current.rotationDegrees.toDouble())
+                                val factor = current.scale * latestStageScale
+                                val dx = (dragAmount.x * cos(angle) - dragAmount.y * sin(angle)).toFloat() * factor
+                                val dy = (dragAmount.x * sin(angle) + dragAmount.y * cos(angle)).toFloat() * factor
+                                engine.moveOverlay(
+                                    current.id,
+                                    current.xPercent + dx / latestWidth,
+                                    current.yPercent + dy / latestHeight,
+                                )
+                            }
+                        }
+                        .padding(4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    when (overlay.kind) {
+                        OverlayKind.EMOJI -> {
+                            Text(
+                                text = overlay.content,
+                                fontSize = 36.sp,
+                            )
+                        }
+                        OverlayKind.TEXT -> {
+                            Surface(
+                                color = Color(overlay.backgroundArgb),
+                                shape = RoundedCornerShape(8.dp),
+                            ) {
+                                Text(
+                                    text = overlay.content,
+                                    color = Color(overlay.colorArgb),
+                                    fontFamily = fontFamily,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontStyle = if (overlay.fontId == BuiltInFont.SERIF_CINEMA.id) FontStyle.Italic else FontStyle.Normal,
+                                    fontSize = 16.sp,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    ) { measurables, constraints ->
+        val placeable = measurables.first().measure(Constraints(maxWidth = maxBoxWidthPx))
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            placeable.place(
+                (centerX - placeable.width / 2f).roundToInt(),
+                (centerY - placeable.height / 2f).roundToInt(),
+            )
         }
     }
 }

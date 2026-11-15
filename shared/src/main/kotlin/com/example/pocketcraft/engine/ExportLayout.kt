@@ -21,13 +21,29 @@ object ExportLayout {
     }
 
     /** Pixel pro dp, damit Texte/Emojis im Video so groß wirken wie in der Vorschau (~391x421 dp Bühne). */
-    fun dpScale(size: OutputSize, project: VideoProject): Float {
-        val aspect = project.aspectRatio.aspectFloat
+    fun dpScale(size: OutputSize, project: VideoProject): Float =
+        size.width / referenceWidthDp(project.aspectRatio.aspectFloat)
+
+    /**
+     * Breite der Vorschau-Bühne in dp, auf die sich alle Text-/Emoji-/Untertitel-Maße beziehen.
+     * Die Vorschau rechnet ihre tatsächliche Breite darauf um – so sieht ein Overlay in der kleinen
+     * Vorschau (Tastatur offen), in der großen Vorschau und im exportierten Video gleich aus.
+     */
+    fun referenceWidthDp(aspect: Float): Float {
         val stageW = 391f
         val stageH = 421f
-        val previewWidthDp = if (stageW / stageH > aspect) stageH * aspect else stageW
-        return size.width / previewWidthDp
+        return if (stageW / stageH > aspect) stageH * aspect else stageW
     }
+
+    /** Innenabstand (in dp) links/rechts zwischen Text und Rand der Overlay-Box: 4 dp Rahmen + 10 dp Fläche. */
+    const val OVERLAY_TEXT_INSET_DP = 14f
+
+    /**
+     * Größte Breite einer Overlay-Box vor dem Skalieren. Längere Texte brechen um, sodass die Box
+     * auch mit ihrer Skalierung [scale] noch ins Bild der Breite [canvasWidth] passt.
+     */
+    fun overlayMaxBoxWidth(canvasWidth: Float, scale: Float): Float =
+        canvasWidth * 0.94f / scale.coerceAtLeast(0.1f)
 
     /** Dateiname für ein exportiertes Video, z.B. `PocketCraft_Urlaub_20261109_142233.mp4`. */
     fun exportFileName(title: String, stamp: String): String {

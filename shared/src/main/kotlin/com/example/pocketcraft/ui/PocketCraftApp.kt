@@ -117,6 +117,23 @@ fun PocketCraftApp(
                 )
             }
 
+            // Befehlsverlauf des Projekts (Befehl "show edits")
+            if (engine.isEditsDialogOpen) {
+                EditsDialog(
+                    engine = engine,
+                    onClose = { engine.isEditsDialogOpen = false },
+                )
+            }
+
+            // Text eines Overlays bearbeiten (ausgewähltes Element im Video antippen)
+            engine.project.overlays.firstOrNull { it.id == engine.editingOverlayId }?.let { editing ->
+                OverlayEditDialog(
+                    engine = engine,
+                    overlay = editing,
+                    onClose = { engine.editingOverlayId = null },
+                )
+            }
+
             // Optionaler PDF-Anleitungs-Viewer & Generator (wird über "📄 PDF" oder Befehl "pdf" geöffnet)
             if (engine.isPdfManualOpen) {
                 PocketScriptPdfManualDialog(
