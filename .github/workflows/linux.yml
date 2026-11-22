@@ -26,7 +26,8 @@ jobs:
       - name: Install Linux packaging & runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y fakeroot dpkg-dev xvfb libasound2t64 libxi6 libxrender1 libxtst6 libfreetype6 fontconfig file
+          sudo apt-get install -y fakeroot dpkg-dev xvfb xdg-utils desktop-file-utils libasound2t64 libxi6 libxrender1 libxtst6 libfreetype6 fontconfig file
+          sudo mkdir -p /usr/share/desktop-directories /usr/share/applications
 
       - name: Determine version
         id: ver
