@@ -33,10 +33,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -286,7 +284,7 @@ private fun StageTopBar(
             horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
             Text(
-                text = "${engine.currentFormatLabel()} · ${(project.transform.zoom * 10).roundToInt() / 10f}x",
+                text = "${engine.currentFormatLabel()} · ${(engine.currentTransform().zoom * 10).roundToInt() / 10f}x",
                 color = Color(0xFF9AA5B8),
                 fontSize = 11.sp,
                 maxLines = 1,
@@ -359,9 +357,8 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
     val transform = engine.currentTransform(engine.playheadMs)
     val blurCfg = project.blur
 
-    var liveZoom by remember(transform.zoom) { mutableFloatStateOf(transform.zoom) }
-    var livePanX by remember(transform.panX) { mutableFloatStateOf(transform.panX) }
-    var livePanY by remember(transform.panY) { mutableFloatStateOf(transform.panY) }
+    // Aktueller Transform-Zustand für Gesten (per rememberUpdatedState, damit Skript-Änderungen nie von altem Zustand überschrieben werden)
+    val latestTransformState = rememberUpdatedState(transform)
 
     val activeAspect = engine.currentAspectFloat(engine.playheadMs)
     BoxWithConstraints(
@@ -380,9 +377,9 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                         if (event.type == PointerEventType.Scroll) {
                             val dy = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
                             if (dy != 0f) {
-                                val updatedZoom = (liveZoom * (1f - dy * 0.06f).coerceIn(0.7f, 1.4f)).coerceIn(1.0f, 5.0f)
-                                liveZoom = updatedZoom
-                                engine.setZoomAndPan(updatedZoom, livePanX, livePanY)
+                                val cur = latestTransformState.value
+                                val updatedZoom = (cur.zoom * (1f - dy * 0.06f).coerceIn(0.7f, 1.4f)).coerceIn(0.1f, 5.0f)
+                                engine.setZoomAndPan(updatedZoom, cur.panX, cur.panY)
                                 event.changes.forEach { it.consume() }
                             }
                         }
@@ -392,12 +389,10 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoomChange, _ ->
                     if (zoomChange != 1f || pan != Offset.Zero) {
-                        val updatedZoom = (liveZoom * zoomChange).coerceIn(1.0f, 5.0f)
-                        val updatedPanX = (livePanX + pan.x / size.width.coerceAtLeast(1)).coerceIn(-1.0f, 1.0f)
-                        val updatedPanY = (livePanY + pan.y / size.height.coerceAtLeast(1)).coerceIn(-1.0f, 1.0f)
-                        liveZoom = updatedZoom
-                        livePanX = updatedPanX
-                        livePanY = updatedPanY
+                        val cur = latestTransformState.value
+                        val updatedZoom = (cur.zoom * zoomChange).coerceIn(0.1f, 5.0f)
+                        val updatedPanX = (cur.panX + pan.x / size.width.coerceAtLeast(1)).coerceIn(-1.0f, 1.0f)
+                        val updatedPanY = (cur.panY + pan.y / size.height.coerceAtLeast(1)).coerceIn(-1.0f, 1.0f)
                         engine.setZoomAndPan(updatedZoom, updatedPanX, updatedPanY)
                     }
                 }
@@ -461,13 +456,14 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                     val cropW = (rightPx - leftPx).coerceAtLeast(6f)
                     val cropH = (bottomPx - topPx).coerceAtLeast(6f)
 
-                    // Abgeschnittene Außenbereiche komplett wegschneiden (Studio-Schwarz),
-                    // sodass z.B. bei `u90%` unten 90% verschwinden und oben nur der 10%-Balken bleibt.
-                    val maskColor = Color(0xFF05070B).copy(alpha = 0.96f)
-                    drawRect(maskColor, Offset(0f, 0f), Size(size.width, topPx))
-                    drawRect(maskColor, Offset(0f, bottomPx), Size(size.width, size.height - bottomPx))
-                    drawRect(maskColor, Offset(0f, topPx), Size(leftPx, cropH))
-                    drawRect(maskColor, Offset(rightPx, topPx), Size(size.width - rightPx, cropH))
+                    // Abgeschnittene Außenbereiche komplett deckend maskieren (Studio-Schwarz),
+                    // und weit über die Grenzen hinausziehen, damit auch bei Zoom-Out/Pan nichts durchscheint.
+                    val maskColor = Color(0xFF05070B)
+                    val far = maxOf(size.width, size.height) * 20f
+                    drawRect(maskColor, Offset(-far, -far), Size(size.width + 2 * far, topPx + far))
+                    drawRect(maskColor, Offset(-far, bottomPx), Size(size.width + 2 * far, size.height - bottomPx + far))
+                    drawRect(maskColor, Offset(-far, topPx), Size(leftPx + far, cropH))
+                    drawRect(maskColor, Offset(rightPx, topPx), Size(size.width - rightPx + far, cropH))
 
                     // Rahmen für den verbleibenden Bildausschnitt
                     drawRect(
@@ -599,10 +595,16 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                 LocalDensity provides stageDensity,
                 LocalTextStyle provides TextStyle.Default,
             ) {
+            val subAlignment = when {
+                kotlin.math.abs(activeSub.verticalPosition - 0.82f) <= 0.03f -> Alignment.BottomCenter
+                activeSub.verticalPosition < 0.35f -> Alignment.TopCenter
+                activeSub.verticalPosition > 0.65f -> Alignment.BottomCenter
+                else -> Alignment.Center
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .align(Alignment.BottomCenter)
+                    .align(subAlignment)
                     .padding(horizontal = 12.dp, vertical = 18.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -908,7 +910,7 @@ private fun TimelineScrubberBar(engine: ProjectEngine) {
                         change.consume()
                         val p = engine.project
                         val frac = (change.position.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
-                        engine.playheadMs = (frac * p.sourceDurationMs).toLong().coerceIn(p.trimStartMs, p.trimEndMs)
+                        engine.playheadMs = p.resolvePlayablePosition((frac * p.sourceDurationMs).toLong())
                     }
                 }
                 .pointerInput(Unit) {

@@ -146,11 +146,12 @@ class DesktopFrameRenderer(
         val top = h * t.cropTop
         val r = w * t.cropRight
         val b = h * t.cropBottom
-        Paint().apply { color = argb(245, 5, 7, 11) }.use { paint ->
-            canvas.drawRect(Rect.makeLTRB(0f, 0f, w, top), paint)
-            canvas.drawRect(Rect.makeLTRB(0f, b, w, h), paint)
-            canvas.drawRect(Rect.makeLTRB(0f, top, l, b), paint)
-            canvas.drawRect(Rect.makeLTRB(r, top, w, b), paint)
+        val far = maxOf(w, h) * 20f
+        Paint().apply { color = argb(255, 0, 0, 0) }.use { paint ->
+            canvas.drawRect(Rect.makeLTRB(-far, -far, w + far, top), paint)
+            canvas.drawRect(Rect.makeLTRB(-far, b, w + far, h + far), paint)
+            canvas.drawRect(Rect.makeLTRB(-far, top, l, b), paint)
+            canvas.drawRect(Rect.makeLTRB(r, top, w + far, b), paint)
         }
     }
 
@@ -230,7 +231,11 @@ class DesktopFrameRenderer(
             val boxW = lineW + 24 * dp
             val boxH = p.height + 12 * dp
             val left = (w - boxW) / 2f
-            val top = h - 18 * dp - boxH
+            val top = if (kotlin.math.abs(sub.verticalPosition - 0.82f) > 0.03f) {
+                (sub.verticalPosition * h - boxH / 2f).coerceIn(12 * dp, h - 18 * dp - boxH)
+            } else {
+                h - 18 * dp - boxH
+            }
             val box = RRect.makeXYWH(left, top, boxW, boxH, 10 * dp)
             Paint().apply { color = sub.backgroundColorArgb.toInt() }.use { canvas.drawRRect(box, it) }
             Paint().apply {

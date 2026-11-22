@@ -39,7 +39,7 @@ object AndroidPdfManual {
             textSize = 11f
         }
         canvas.drawText("Kompakte Videoschnitt-Sprache für das 2-Sekunden-Code-Fenster auf dem Pixel 9", 32f, 70f, subPaint)
-        canvas.drawText("Beispiele:  all u20%  |  90 u90%  |  10-24,3 (8:15)  |  8-10 set caption: Pinker Honig.red", 32f, 88f, subPaint)
+        drawFittedText(canvas, "Beispiele:  all u20%  |  0-4 zoom in 0,2  |  set cut 00:33.3  |  8-10 set caption: Pinker Honig.red", 32f, 88f, subPaint, 531f)
 
         val sectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#0F172A")
@@ -69,7 +69,7 @@ object AndroidPdfManual {
                 canvas = page.canvas
                 y = 48f
             }
-            canvas.drawText(sec.title, 32f, y, sectionPaint)
+            drawFittedText(canvas, sec.title, 32f, y, sectionPaint, 531f)
             y += 10f
             for ((code, desc) in sec.codeExamples) {
                 if (y + 38f > 810f) {
@@ -80,8 +80,8 @@ object AndroidPdfManual {
                     y = 48f
                 }
                 canvas.drawRoundRect(RectF(32f, y, 563f, y + 32f), 6f, 6f, codeBoxPaint)
-                canvas.drawText(code, 40f, y + 13f, codeTextPaint)
-                canvas.drawText(desc, 40f, y + 26f, descTextPaint)
+                drawFittedText(canvas, code, 40f, y + 13f, codeTextPaint, 515f)
+                drawFittedText(canvas, desc, 40f, y + 26f, descTextPaint, 515f)
                 y += 37f
             }
             y += 10f
@@ -96,5 +96,25 @@ object AndroidPdfManual {
         }
         doc.close()
         return pdfFile
+    }
+
+    /** Zeichnet Text innerhalb von [maxWidth], indem zu lange Zeilen proportional verkleinert werden. */
+    private fun drawFittedText(
+        canvas: Canvas,
+        text: String,
+        x: Float,
+        y: Float,
+        basePaint: Paint,
+        maxWidth: Float = 515f,
+    ) {
+        val measured = basePaint.measureText(text)
+        if (measured <= maxWidth || measured <= 0f) {
+            canvas.drawText(text, x, y, basePaint)
+            return
+        }
+        val fitted = Paint(basePaint).apply {
+            textSize = (basePaint.textSize * maxWidth / measured).coerceAtLeast(6f)
+        }
+        canvas.drawText(text, x, y, fitted)
     }
 }

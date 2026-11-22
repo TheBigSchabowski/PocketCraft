@@ -277,7 +277,7 @@ private fun TwoSecondCommandTriggerBar(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CropAndZoomToolView(engine: ProjectEngine) {
-    val t = engine.project.transform
+    val t = engine.currentTransform()
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // Seitenverhältnis-Presets (zum schnellen Kleiner-Schneiden)
         Text(
@@ -304,20 +304,27 @@ private fun CropAndZoomToolView(engine: ProjectEngine) {
                 onClick = { engine.setRotation(t.rotationDegrees + 90f) },
             )
             SmallActionChip(
+                label = "🔍+ Reinzoomen",
+                active = false,
+                onClick = { engine.executeCommand("zoom in") },
+            )
+            SmallActionChip(
+                label = "🔍- Rauszoomen",
+                active = false,
+                onClick = { engine.executeCommand("zoom out") },
+            )
+            SmallActionChip(
                 label = "Reset Zoom",
                 active = false,
-                onClick = {
-                    engine.setZoomAndPan(1.0f, 0f, 0f)
-                    engine.setCropMargins(0f, 0f, 1f, 1f)
-                },
+                onClick = { engine.resetZoomAndCrop() },
             )
         }
 
-        // Stufenloser Zoom-Regler (1.0x bis 5.0x)
+        // Stufenloser Zoom-Regler (0.2x bis 5.0x – < 1.0x startet/verkleinert in der Mitte)
         CompactSliderRow(
             label = "Zoom (${(t.zoom * 100).roundToInt()}%)",
-            value = t.zoom,
-            valueRange = 1.0f..5.0f,
+            value = t.zoom.coerceIn(0.2f, 5.0f),
+            valueRange = 0.2f..5.0f,
             onValueChange = { engine.setZoomAndPan(zoom = it) },
         )
 

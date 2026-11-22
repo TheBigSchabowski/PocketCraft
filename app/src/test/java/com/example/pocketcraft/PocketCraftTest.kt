@@ -374,4 +374,34 @@ class PocketCraftTest {
         // Wiedergabe loopt bei 42s zurück an den Anfang
         assertEquals(42_000L, p.resolvePlayablePosition(50_000L))
     }
+
+    @Test
+    fun animatedZoomAndDecimalTimecodeWorkEndToEnd() {
+        val engine = ProjectEngine()
+        engine.setVideoSource("content://test/sample_video.mp4", 53_358L, "Sample Clip")
+        engine.executeCommand("clear all")
+
+        val res = engine.executeCommand(
+            """
+            all u20%
+            0-4 zoom 2,5
+            set cut 00:33.3
+            delete before cut1
+            34-38 zoom in 0,2
+            50-53.3 set text: Abendstart.red
+            while text red: r15% l15% zoom 1,5
+            """.trimIndent(),
+        )
+        assertFalse(res, engine.commandHistory.last().isError)
+        assertEquals(33_300L, engine.project.trimStartMs)
+        // Span vor cut1 (0-4s) wurde durch `delete before cut1` entfernt
+        assertEquals(1.0f, engine.currentTransform(2_000L).zoom, 0.01f)
+        // Animierter Zoom-In ab 34s startet klein in der Mitte (0.2x) und vergrößert auf 1.0x
+        assertEquals(0.2f, engine.currentTransform(34_000L).zoom, 0.01f)
+        assertEquals(0.6f, engine.currentTransform(36_000L).zoom, 0.01f)
+        assertEquals(1.0f, engine.currentTransform(38_000L).zoom, 0.01f)
+        assertEquals(1.5f, engine.currentTransform(51_000L).zoom, 0.01f)
+        assertEquals(0.15f, engine.currentTransform(51_000L).cropLeft, 0.01f)
+        assertEquals(0.85f, engine.currentTransform(51_000L).cropRight, 0.01f)
+    }
 }

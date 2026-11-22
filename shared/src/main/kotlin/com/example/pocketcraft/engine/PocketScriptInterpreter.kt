@@ -142,14 +142,17 @@ object PocketScriptInterpreter {
         "delete", "clear", "export", "font", "rotate", "split", "reset",
     )
 
-    /** Eingebaute, nur lesbare Werte über das aktuelle Projekt (Zeiten in Sekunden). */
+    /** Einheitliche Zehntelsekunden-Genauigkeit für alle Skript-Zeitvariablen (wie UI & Timecodes). */
+    private fun tenthsSec(ms: Long): Double = (ms / 100L).coerceAtLeast(0L) / 10.0
+
+    /** Eingebaute, nur lesbare Werte über das aktuelle Projekt (Zeiten in Sekunden, einheitlich auf 0,1s). */
     private val builtinVariables: Map<String, (ProjectEngine) -> Any> = mapOf(
-        "duration" to { e -> e.project.sourceDurationMs / 1000.0 },
-        "dauer" to { e -> e.project.sourceDurationMs / 1000.0 },
-        "trimstart" to { e -> e.project.trimStartMs / 1000.0 },
-        "trimend" to { e -> e.project.trimEndMs / 1000.0 },
-        "length" to { e -> e.project.playableDurationMs / 1000.0 },
-        "playhead" to { e -> e.playheadMs / 1000.0 },
+        "duration" to { e -> tenthsSec(e.project.sourceDurationMs) },
+        "dauer" to { e -> tenthsSec(e.project.sourceDurationMs) },
+        "trimstart" to { e -> tenthsSec(e.project.trimStartMs) },
+        "trimend" to { e -> tenthsSec(e.project.trimEndMs) },
+        "length" to { e -> tenthsSec(e.project.playableDurationMs) },
+        "playhead" to { e -> tenthsSec(e.playheadMs) },
         "zoom" to { e -> e.project.transform.zoom.toDouble() },
         "speed" to { e -> e.project.playbackSpeed.toDouble() },
         "captions" to { e -> e.project.subtitles.size.toDouble() },
@@ -191,8 +194,14 @@ object PocketScriptInterpreter {
             // Reine Befehlslisten wie bisher: erst die Setup-Zeilen, danach die `if`/`while`-Regeln,
             // damit eine Regel auch dann greift, wenn sie vor dem passenden `set caption:` steht.
             val (rules, setup) = lines.partition { PocketScriptParser.isLegacyRuleLine(it) }
-            val results = (setup + rules).map { engine.executeCommand(it) }
-            return "${lines.size} Zeilen ausgeführt: " + results.joinToString(" · ")
+            var anyError = false
+            val results = (setup + rules).map { line ->
+                val res = engine.executeCommand(line)
+                if (engine.commandHistory.lastOrNull()?.isError == true) anyError = true
+                res
+            }
+            val prefix = if (anyError) "⚠ " else ""
+            return "$prefix${lines.size} Zeilen ausgeführt: " + results.joinToString(" · ")
         }
 
         try {
@@ -719,8 +728,8 @@ object PocketScriptInterpreter {
 
         private fun element(name: String, index: Int, startMs: Long, endMs: Long, text: String): Map<String, Any> = mapOf(
             name to (index + 1).toDouble(),
-            "${name}_start" to startMs / 1000.0,
-            "${name}_end" to endMs / 1000.0,
+            "${name}_start" to tenthsSec(startMs),
+            "${name}_end" to tenthsSec(endMs),
             "${name}_text" to text,
         )
 

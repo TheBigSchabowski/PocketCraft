@@ -82,6 +82,16 @@ data class VideoProject(
             if (span.cropLeft != null && right <= left + 0.02f) {
                 right = 1.0f
             }
+            // Bei Zoom-Animationen (zoom -> zoomEnd) linear zwischen Start- und Endzeitpunkt interpolieren
+            val spanZoom = when {
+                span.zoom != null && span.zoomEnd != null -> {
+                    val duration = (span.endMs - span.startMs).coerceAtLeast(1L)
+                    val fraction = ((atMs - span.startMs).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                    (span.zoom + (span.zoomEnd - span.zoom) * fraction).coerceIn(0.1f, 5.0f)
+                }
+                span.zoom != null -> span.zoom.coerceIn(0.1f, 5.0f)
+                else -> current.zoom
+            }
             current = current.copy(
                 cropLeft = left.coerceIn(0f, 0.98f),
                 cropTop = top.coerceIn(0f, 0.98f),
@@ -89,7 +99,7 @@ data class VideoProject(
                 cropBottom = bottom.coerceIn((top + 0.02f).coerceAtMost(1f), 1f),
                 panX = (span.panX ?: current.panX).coerceIn(-1f, 1f),
                 panY = (span.panY ?: current.panY).coerceIn(-1f, 1f),
-                zoom = span.zoom ?: current.zoom,
+                zoom = spanZoom,
             )
         }
         return current
@@ -173,6 +183,8 @@ data class TimedFormatSpan(
     val panX: Float? = null,
     val panY: Float? = null,
     val zoom: Float? = null,
+    /** Optionales Ziel für animiertes Rein-/Rauszoomen (`zoom` -> `zoomEnd` über `startMs..endMs`). */
+    val zoomEnd: Float? = null,
     val filterPreset: VideoFilterPreset? = null,
     val blurRadiusPx: Float? = null,
 ) {
@@ -196,8 +208,8 @@ data class CutMarker(
 /**
  * Zustand für Zoom, Pan (Verschiebung), Rotation und freies Kleiner-Schneiden (Crop-Ränder).
  *
- * - [zoom] vergrößert das Bild stufenlos (1.0x bis 5.0x), entweder per Pinch-to-Zoom direkt auf dem
- *   Video, per Slider oder per Befehl (`zoom 1.8`).
+ * - [zoom] vergrößert oder verkleinert das Bild stufenlos (0.1x bis 5.0x; < 1.0x verkleinert zur Mitte hin),
+ *   entweder per Pinch-to-Zoom direkt auf dem Video, per Slider oder per Befehl (`zoom 1.8`, `zoom in`, `zoom out`).
  * - [panX] / [panY] verschieben den Bildausschnitt normiert (-1.0 bis +1.0, z.B. `all move 10%l` -> `panY = +0.10f`).
  * - [cropLeft] (`l%`), [cropTop] (`o%`), [cropRight] (`1 - r%`), [cropBottom] (`1 - u%`) schneiden
  *   das Bild an jeder Kante prozentgenau kleiner (normierte Koordinaten 0.0 bis 1.0).

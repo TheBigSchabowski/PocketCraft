@@ -1,13 +1,17 @@
 package com.example.pocketcraft.ui
 
 import android.content.Context
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.net.Uri
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -17,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.pocketcraft.engine.FilterMath
 import com.example.pocketcraft.engine.ProjectEngine
 import kotlin.math.abs
 
@@ -202,8 +207,20 @@ fun TrimAwareVideoPlayer(
         onDispose { controller.releasePlayer() }
     }
 
+    val filterMatrix = remember(engine.project.filter) { FilterMath.colorMatrix(engine.project.filter) }
+
     AndroidView(
         factory = { ctx -> TextureView(ctx).also { controller.attach(it) } },
+        update = { view ->
+            if (filterMatrix != null) {
+                val paint = Paint().apply {
+                    colorFilter = ColorMatrixColorFilter(ColorMatrix(filterMatrix))
+                }
+                view.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+            } else {
+                view.setLayerPaint(null)
+            }
+        },
         modifier = modifier,
     )
 

@@ -437,17 +437,67 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         zoom: Float = project.transform.zoom,
         panX: Float = project.transform.panX,
         panY: Float = project.transform.panY,
+        clearTimedZoom: Boolean = false,
     ) {
-        val clampedZoom = zoom.coerceIn(1.0f, 5.0f)
+        val clampedZoom = zoom.coerceIn(0.1f, 5.0f)
         val clampedPanX = panX.coerceIn(-1.0f, 1.0f)
         val clampedPanY = panY.coerceIn(-1.0f, 1.0f)
-        commitChange("Zoom ${(clampedZoom * 10).roundToInt() / 10f}x", coalesceKey = "zoom") { p ->
+        commitChange("Zoom ${(clampedZoom * 10).roundToInt() / 10f}x", coalesceKey = if (clearTimedZoom) null else "zoom") { p ->
+            val updatedSpans = if (clearTimedZoom) {
+                p.timedFormatSpans.mapNotNull { span ->
+                    val stripped = span.copy(zoom = null, zoomEnd = null)
+                    if (!stripped.hasCustomRatio &&
+                        stripped.cropLeft == null &&
+                        stripped.cropTop == null &&
+                        stripped.cropRight == null &&
+                        stripped.cropBottom == null &&
+                        stripped.panX == null &&
+                        stripped.panY == null &&
+                        stripped.filterPreset == null &&
+                        stripped.blurRadiusPx == null
+                    ) {
+                        null
+                    } else {
+                        stripped
+                    }
+                }
+            } else {
+                p.timedFormatSpans
+            }
             p.copy(
                 transform = p.transform.copy(
                     zoom = clampedZoom,
                     panX = clampedPanX,
                     panY = clampedPanY,
                 ),
+                timedFormatSpans = updatedSpans,
+            )
+        }
+    }
+
+    /** Setzt Zoom, Pan, Rotation, Kanten-Zuschnitt sowie zeitgebundene Zoom-/Crop-/Pan-Spans zurück. */
+    fun resetZoomAndCrop() {
+        commitChange("Zoom & Zuschnitt zurückgesetzt") { p ->
+            val cleanedSpans = p.timedFormatSpans.mapNotNull { span ->
+                val stripped = span.copy(
+                    cropLeft = null,
+                    cropTop = null,
+                    cropRight = null,
+                    cropBottom = null,
+                    panX = null,
+                    panY = null,
+                    zoom = null,
+                    zoomEnd = null,
+                )
+                if (!stripped.hasCustomRatio && stripped.filterPreset == null && stripped.blurRadiusPx == null) {
+                    null
+                } else {
+                    stripped
+                }
+            }
+            p.copy(
+                transform = CropZoomState(),
+                timedFormatSpans = cleanedSpans,
             )
         }
     }
@@ -962,12 +1012,13 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             }
 
             "zoom", "z" -> {
-                val factor = args.firstOrNull()?.replace(",", ".")?.toFloatOrNull()
+                val raw = args.joinToString(" ").trim()
+                val factor = PocketScriptParser.parseRelativeOrAbsoluteZoom(raw, currentTransform().zoom)
                 if (factor == null) {
                     isError = true
-                    resultMessage = "Syntax: zoom <Faktor 1.0 - 5.0>, z.B. 'zoom 1.8'"
+                    resultMessage = "Syntax: zoom <0.1 - 5.0 | in | out | 1 -> 2>, z.B. 'zoom 1.8', 'zoom 0.5' oder 'zoom in'"
                 } else {
-                    setZoomAndPan(zoom = factor)
+                    setZoomAndPan(zoom = factor, clearTimedZoom = true)
                     resultMessage = "Zoom auf ${project.transform.zoom}x gesetzt."
                 }
             }
@@ -1013,13 +1064,13 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             }
 
             "trim", "cut", "kürzen", "kuerzen" -> {
-                val startSec = args.getOrNull(0)?.replace(",", ".")?.toFloatOrNull()
-                val endSec = args.getOrNull(1)?.replace(",", ".")?.toFloatOrNull()
-                if (startSec == null || endSec == null) {
+                val startMs = args.getOrNull(0)?.let { PocketScriptParser.resolveCutOrTime(it, this) }
+                val endMs = args.getOrNull(1)?.let { PocketScriptParser.resolveCutOrTime(it, this) }
+                if (startMs == null || endMs == null) {
                     isError = true
-                    resultMessage = "Syntax: trim <StartSek> <EndeSek>, z.B. 'trim 1.5 10.0'"
+                    resultMessage = "Syntax: trim <Start> <Ende>, z.B. 'trim 1.5 10.0' oder 'trim 00:10.5 00:33.3'"
                 } else {
-                    setTrimRange((startSec * 1000).toLong(), (endSec * 1000).toLong())
+                    setTrimRange(minOf(startMs, endMs), maxOf(startMs, endMs))
                     resultMessage = "Video gekürzt auf ${formatSec(project.trimStartMs)} bis ${formatSec(project.trimEndMs)}."
                 }
             }
@@ -1221,7 +1272,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 }
             }
             "help", "?" -> {
-                resultMessage = "Vorführung: demo · Programmieren: let x = 5 (Projekt), global x = 5 / global def … (alle Projekte), zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Verlauf: show edits (alle Befehle dieses Projekts), clear edits · Text/Emoji ändern: texts (Liste), move text1 10%u | 10%l | 10%r | 10%left | 50 20 | top, edit text1: Neuer Text, size text1 150 · Befehle: undo, redo, zoom <1..5>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
+                resultMessage = "Vorführung: demo · Programmieren: let x = 5 (Projekt), global x = 5 / global def … (alle Projekte), zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Verlauf: show edits (alle Befehle dieses Projekts), clear edits · Text/Emoji ändern: texts (Liste), move text1 10%u | 10%l | 10%r | 10%left | 50 20 | top, edit text1: Neuer Text, size text1 150 · Befehle: undo, redo, zoom <0.1..5|in|out|1->2>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
             }
 
             else -> {
@@ -1388,10 +1439,12 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         }
 
         fun formatTimecode(ms: Long): String {
-            val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+            val totalTenths = (ms / 100L).coerceAtLeast(0L)
+            val totalSeconds = totalTenths / 10L
+            val tenths = totalTenths % 10L
             val mins = totalSeconds / 60L
             val secs = totalSeconds % 60L
-            return "%02d:%02d".format(mins, secs)
+            return "%02d:%02d.%d".format(mins, secs, tenths)
         }
     }
 }

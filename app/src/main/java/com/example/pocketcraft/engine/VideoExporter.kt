@@ -370,9 +370,11 @@ internal class ExportOverlayRenderer(
 
     fun render(sourceMs: Long): Bitmap {
         val t = project.transformAt(sourceMs)
+        val hasCrop = t.cropLeft > 0.005f || t.cropTop > 0.005f || t.cropRight < 0.995f || t.cropBottom < 0.995f
         val overlays = project.overlays.filter { sourceMs in it.startMs..it.endMs }
         val sub = project.subtitles.firstOrNull { sourceMs in it.startMs..it.endMs }
-        val key = "${t.hashCode()}|${overlays.joinToString(",") { it.id }}|${sub?.id}"
+        // Transform-Hash nur in den Cache-Schlüssel aufnehmen, wenn tatsächlich Kanten zugeschnitten sind
+        val key = "${if (hasCrop) t.hashCode() else 0}|${overlays.joinToString(",") { it.id }}|${sub?.id}"
         if (key == lastKey) return buffers[current]
 
         current = 1 - current
@@ -389,11 +391,11 @@ internal class ExportOverlayRenderer(
         return bmp
     }
 
-    /** Wie die Vorschau: Maske liegt im transformierten Layer (bewegt sich mit `move`). */
+    /** Wie die Vorschau: deckend schwarze Maske liegt im transformierten Layer und deckt auch Zoom/Pan ab. */
     private fun drawCropMask(canvas: Canvas, t: com.example.pocketcraft.model.CropZoomState) {
         val hasCrop = t.cropLeft > 0.005f || t.cropTop > 0.005f || t.cropRight < 0.995f || t.cropBottom < 0.995f
         if (!hasCrop) return
-        val paint = Paint().apply { color = Color.argb(245, 5, 7, 11) }
+        val paint = Paint().apply { color = Color.BLACK }
         canvas.save()
         canvas.concat(
             Matrix().apply {
@@ -406,10 +408,11 @@ internal class ExportOverlayRenderer(
         val top = h * t.cropTop
         val r = w * t.cropRight
         val b = h * t.cropBottom
-        canvas.drawRect(0f, 0f, w, top, paint)
-        canvas.drawRect(0f, b, w, h, paint)
-        canvas.drawRect(0f, top, l, b, paint)
-        canvas.drawRect(r, top, w, b, paint)
+        val far = maxOf(w, h) * 20f
+        canvas.drawRect(-far, -far, w + far, top, paint)
+        canvas.drawRect(-far, b, w + far, h + far, paint)
+        canvas.drawRect(-far, top, l, b, paint)
+        canvas.drawRect(r, top, w + far, b, paint)
         canvas.restore()
         // Bereiche, die durch die Verschiebung frei werden, bleiben (wie in der Vorschau) schwarz
     }
@@ -506,7 +509,11 @@ internal class ExportOverlayRenderer(
         val boxW = lineW + 24 * dp
         val boxH = layout.height + 12 * dp
         val left = (w - boxW) / 2f
-        val top = h - 18 * dp - boxH
+        val top = if (kotlin.math.abs(sub.verticalPosition - 0.82f) > 0.03f) {
+            (sub.verticalPosition * h - boxH / 2f).coerceIn(12 * dp, h - 18 * dp - boxH)
+        } else {
+            h - 18 * dp - boxH
+        }
         val rect = RectF(left, top, left + boxW, top + boxH)
         canvas.drawRoundRect(rect, 10 * dp, 10 * dp, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = sub.backgroundColorArgb.toInt() })
         canvas.drawRoundRect(

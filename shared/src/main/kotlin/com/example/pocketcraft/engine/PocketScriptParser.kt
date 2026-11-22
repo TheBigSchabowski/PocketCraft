@@ -11,6 +11,7 @@ import com.example.pocketcraft.model.SubtitleSegment
 import com.example.pocketcraft.model.TimedFormatSpan
 import com.example.pocketcraft.model.VideoFilterPreset
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * Parser und Interpreter für **PocketScript** – die kompakte Videoschnitt-Programmiersprache
@@ -77,6 +78,10 @@ object PocketScriptParser {
         val yPercent: Float?,
     )
 
+    // Einheitliche Bausteine für Zeitangaben: Sekunden (10 / 24,3 / 24.3s) sowie Timecodes (00:33 / 00:33.3 / 1:02:03.5)
+    private const val TIME_ATOM = """\d+(?::\d+)*(?:[.,]\d+)?(?:s|sek)?"""
+    private const val TIME_RANGE_TOKEN = """(?:all|alles|\*|$TIME_ATOM(?:\s*-\s*$TIME_ATOM)?)"""
+
     // Regex für `if <Bedingung>: <Befehl>` und `while <Bedingung>: <Befehl>`
     // Beispiel: `if caption red: u20%`, `if caption red: (9:16)`, `while caption red: u20%`,
     //           `while 0-12 step 4: set emoji: 🔥`
@@ -87,7 +92,7 @@ object PocketScriptParser {
 
     // Zeitintervall-Schleife: `while 0-12 step 4: ...` oder `while step 3: ...`
     private val stepLoopRegex = Regex(
-        pattern = """^(?:(all|\d+(?:[.,]\d+)?(?:\s*-\s*\d+(?:[.,]\d+)?)?)\s+)?(?:step|every|alle|schritt)\s+(\d+(?:[.,]\d+)?)s?$""",
+        pattern = """^(?:($TIME_RANGE_TOKEN)\s+)?(?:step|every|alle|schritt)\s+($TIME_ATOM)$""",
         option = RegexOption.IGNORE_CASE,
     )
 
@@ -120,35 +125,41 @@ object PocketScriptParser {
         return !Regex("""[=<>!+*/%]""").containsMatchIn(cond.substringAfter(' ', ""))
     }
 
-    // Regex für `set cut 00:48`, `set cut1 00:48`, `cut at 00:48`, `cut 00:48`, `set cut: 00:48`
+    // Regex für `set cut 00:48`, `set cut 00:33.3`, `set cut1 00:48`, `cut at 00:48`, `set cut: 00:48`
     private val cutMarkerRegex = Regex(
-        pattern = """^(?:all\s+)?(?:set\s+)?cut(\d+)?(?:\s+at|\s*:)?\s+(\d+(?::\d+)+|\d+(?:[.,]\d+)?(?:s|sek)?)$""",
+        pattern = """^(?:all\s+)?(?:set\s+)?cut(\d+)?(?:\s+at|\s*:)?\s+($TIME_ATOM)$""",
         option = RegexOption.IGNORE_CASE,
     )
 
-    // Regex für `delete after cut1`, `delete behind cut`, `delete before cut1`, `delete after 00:48`
+    // Regex für `delete after cut1`, `delete behind cut`, `delete before cut1`, `delete after 00:48.5`
     private val deleteCutRegex = Regex(
         pattern = """^(?:delete|del|remove|lösche|loesche|cut)\s+(after|behind|nach|hinter|before|in\s+front\s+of|vor|front|between|zwischen)\s+(.+)$""",
         option = RegexOption.IGNORE_CASE,
     )
 
-    // Regex für `delete 10-20` / `delete 00:10-00:20` (Mittelstück herausschneiden)
+    // Regex für `delete 10-20` / `delete 00:10.5-00:20.3` (Mittelstück herausschneiden)
     private val deleteRangeRegex = Regex(
-        pattern = """^(?:delete|del|remove|lösche|loesche)\s+(\d+(?::\d+)*(?:[.,]\d+)?)\s*-\s*(\d+(?::\d+)*(?:[.,]\d+)?)$""",
+        pattern = """^(?:delete|del|remove|lösche|loesche)\s+($TIME_ATOM)\s*-\s*($TIME_ATOM)$""",
         option = RegexOption.IGNORE_CASE,
     )
 
     // Regex für `<Zeitbereich> set <ziel>: <inhalt>`
-    // Beispiel: `8-10 set caption: Pinker Honig.red` oder `all set filter: cyberpunk`
+    // Beispiel: `8-10 set caption: Pinker Honig.red`, `00:50-00:53.3 set text: Hallo` oder `all set filter: cyberpunk`
     private val setStatementRegex = Regex(
-        pattern = """^(all|\d+(?::\d+)+|\d+(?:[.,]\d+)?(?:\s*-\s*(?:\d+(?::\d+)+|\d+(?:[.,]\d+)?))?)?\s*(?:set\s+)?(caption|sub|untertitel|text|title|titel|emoji|sticker|zoom|blur|filter|fx|speed|crop|cut|trim)\s*:\s*(.+)$""",
+        pattern = """^($TIME_RANGE_TOKEN)?\s*(?:set\s+)?(caption|sub|untertitel|text|title|titel|emoji|sticker|zoom|blur|filter|fx|speed|crop|cut|trim)\s*:\s*(.+)$""",
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    // Regex für direkte oder zeitgebundene Zoom-Befehle (`zoom in`, `zoom out`, `0-4 zoom 1 -> 2`, `2-6 zoom 1,8`, `reinzoomen`)
+    private val standaloneZoomRegex = Regex(
+        pattern = """^(?:($TIME_RANGE_TOKEN)\s+)?(?:set\s+)?(?:(zoom|z)(?:\s*:\s*|\s+)(.+)|(reinzoomen|zoomin|rauszoomen|zoomout)(?:(?:\s*:\s*|\s+)(.*))?)$""",
         option = RegexOption.IGNORE_CASE,
     )
 
     // Token-Regexes für Format-Klammern `(8:15)`, Richtungs-Zuschnitte `u20%`, `o20%`, `r20%`, `l20%`
     // sowie prozentuale Verschiebungen `move 10%l` (10% lower/runter) und `move 10%u` (10% up/hoch).
     private val timeTokenRegex = Regex(
-        pattern = """^(all|alles|\*|(?:\d+(?::\d+)+|\d+(?:[.,]\d+)?)(?:-(?:\d+(?::\d+)+|\d+(?:[.,]\d+)?))?)$""",
+        pattern = """^(all|alles|\*|$TIME_ATOM(?:-$TIME_ATOM)?)$""",
         option = RegexOption.IGNORE_CASE,
     )
     private val ratioTokenRegex = Regex(
@@ -178,6 +189,8 @@ object PocketScriptParser {
         var cutLeftPct: Float? = null,   // l20% -> linke 20% wegschneiden
         var moveXPct: Float? = null,     // +10% = rechts, -10% = links
         var moveYPct: Float? = null,     // +10% = 10%l (lower/runter), -10% = 10%u (up/hoch)
+        var zoomStart: Float? = null,
+        var zoomEnd: Float? = null,
     ) {
         val hasModifiers: Boolean
             get() = ratioW != null ||
@@ -186,7 +199,8 @@ object PocketScriptParser {
                 cutRightPct != null ||
                 cutLeftPct != null ||
                 moveXPct != null ||
-                moveYPct != null
+                moveYPct != null ||
+                zoomStart != null
     }
 
     /**
@@ -257,16 +271,32 @@ object PocketScriptParser {
             return executeSetStatement(rangeToken, targetKind, rawPayload, engine)
         }
 
+        // 1b. Zeitgesteuerte oder animierte Zoom-Befehle (`zoom in`, `zoom out`, `0-4 zoom 1 -> 2`, `2-6 zoom 1,8`)
+        val zoomMatch = standaloneZoomRegex.matchEntire(input)
+        if (zoomMatch != null) {
+            val rangeTok = zoomMatch.groupValues[1].ifBlank { "all" }
+            val payload = if (zoomMatch.groupValues[2].isNotEmpty()) {
+                zoomMatch.groupValues[3].trim()
+            } else {
+                val verb = zoomMatch.groupValues[4].lowercase()
+                val dir = if (verb.startsWith("rein") || verb.startsWith("zoomin")) "in" else "out"
+                val arg = zoomMatch.groupValues[5].trim()
+                if (arg.isEmpty()) dir else "$dir $arg"
+            }
+            executeZoomStatement(rangeTok, payload, engine)?.let { return it }
+        }
+
         // 2. Prüfen auf Format-/Auflösungs-Ausdrücke (`10-24,3 (8:15) 9 (16:18)`, `all (9:16)`),
-        //    prozentuale Kanten-Zuschnitte (`all u20%`, `o20%`, `r20%`, `l20%`, `90 u90%`)
-        //    UND prozentuale Bildverschiebungen (`all move 10%l`, `all move 10%u`, `u20% move 10%l`)
+        //    prozentuale Kanten-Zuschnitte (`all u20%`, `o20%`, `r20%`, `l20%`, `90 u90%`),
+        //    prozentuale Bildverschiebungen (`all move 10%l`, `all move 10%u`, `u20% move 10%l`)
+        //    UND kombinierte Zooms (`0-5 u20% zoom in`, `50-53.3 r15% l15% zoom 1,5`)
         val formatOrCropResult = tryParseAndExecuteFormatAndCrop(input, engine)
         if (formatOrCropResult != null) {
             return formatOrCropResult
         }
 
-        // 3. Prüfen auf direkten Zeitbereichs-Trim wie `10-24,3` allein
-        val pureRangeRegex = Regex("""^(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)$""")
+        // 3. Prüfen auf direkten Zeitbereichs-Trim wie `10-24,3` oder `00:10.5-00:33.3` allein
+        val pureRangeRegex = Regex("""^($TIME_ATOM)\s*-\s*($TIME_ATOM)$""", RegexOption.IGNORE_CASE)
         val pureMatch = pureRangeRegex.matchEntire(input)
         if (pureMatch != null) {
             val startMs = parseSecondsToMs(pureMatch.groupValues[1])
@@ -379,7 +409,7 @@ object PocketScriptParser {
             }
 
             // Die Befehle gelten nur in den Zeitfenstern der gefundenen Untertitel – nicht fürs ganze Projekt
-            val execResult = executeConditionActions(matchedSubs.map { it.startMs to it.endMs }, actionBody, engine)
+            val execResult = executeConditionActions(matchedSubs.map { it.startMs to it.endMs }.distinct(), actionBody, engine)
             engine.playheadMs = matchedSubs.first().startMs
             return "$labelPrefix ($cond → ${matchedSubs.size} Treffer): $execResult"
         }
@@ -409,7 +439,7 @@ object PocketScriptParser {
                 return "$labelPrefix ($cond): Kein passendes Overlay gefunden."
             }
 
-            val execResult = executeConditionActions(matchedOverlays.map { it.startMs to it.endMs }, actionBody, engine)
+            val execResult = executeConditionActions(matchedOverlays.map { it.startMs to it.endMs }.distinct(), actionBody, engine)
             engine.playheadMs = matchedOverlays.first().startMs
             return "$labelPrefix ($cond → ${matchedOverlays.size} Overlay-Treffer): $execResult"
         }
@@ -569,11 +599,19 @@ object PocketScriptParser {
                         else -> ov
                     }
                 }
+                val trimmedSpans = p.timedFormatSpans.mapNotNull { span ->
+                    when {
+                        span.startMs >= newEnd -> null
+                        span.endMs > newEnd -> span.copy(endMs = newEnd)
+                        else -> span
+                    }
+                }
                 p.copy(
                     sourceDurationMs = newSourceDur,
                     trimEndMs = newEnd,
                     subtitles = trimmedSubs,
                     overlays = trimmedOverlays,
+                    timedFormatSpans = trimmedSpans,
                 )
             }
             engine.playheadMs = cutTimeMs.coerceAtMost(engine.project.trimEndMs)
@@ -589,10 +627,26 @@ object PocketScriptParser {
                         else -> sub
                     }
                 }
+                val trimmedOverlays = p.overlays.mapNotNull { ov ->
+                    when {
+                        ov.endMs <= newStart -> null
+                        ov.startMs < newStart -> ov.copy(startMs = newStart)
+                        else -> ov
+                    }
+                }
+                val trimmedSpans = p.timedFormatSpans.mapNotNull { span ->
+                    when {
+                        span.endMs <= newStart -> null
+                        span.startMs < newStart -> span.copy(startMs = newStart)
+                        else -> span
+                    }
+                }
                 p.copy(
                     sourceDurationMs = newSourceDur,
                     trimStartMs = newStart,
                     subtitles = trimmedSubs,
+                    overlays = trimmedOverlays,
+                    timedFormatSpans = trimmedSpans,
                 )
             }
             engine.playheadMs = engine.project.trimStartMs
@@ -600,8 +654,8 @@ object PocketScriptParser {
         }
     }
 
-    /** Löst `cut1` / `cut` / `00:48` / `12,5` in Millisekunden auf (oder `null`, falls Marker fehlt). */
-    private fun resolveCutOrTime(token: String, engine: ProjectEngine): Long? {
+    /** Löst `cut1` / `cut` / `00:48` / `00:33.3` / `12,5` in Millisekunden auf (oder `null`, falls ungültig). */
+    internal fun resolveCutOrTime(token: String, engine: ProjectEngine): Long? {
         val clean = token.trim().lowercase()
         if (clean.startsWith("cut")) {
             val num = clean.removePrefix("cut")
@@ -612,7 +666,7 @@ object PocketScriptParser {
             }
             return marker?.timeMs
         }
-        if (!Regex("""^\d+(?::\d+)*(?:[.,]\d+)?(?:s|sek)?$""").matches(clean)) return null
+        if (!Regex("""^$TIME_ATOM$""", RegexOption.IGNORE_CASE).matches(clean)) return null
         return parseSecondsToMs(clean)
     }
 
@@ -637,11 +691,192 @@ object PocketScriptParser {
         option = RegexOption.IGNORE_CASE,
     )
 
-    // `zoom 1,8` / `set zoom: 1,8` hinter einer Bedingung -> Zoom nur im Zeitfenster
+    // `zoom 1,8` / `zoom in` / `zoom out` / `zoom 1 -> 2` hinter einer Bedingung -> Zoom nur im Zeitfenster
     private val scopedZoomRegex = Regex(
-        pattern = """^(?:set\s+)?(?:zoom|z)\s*:?\s*(\d+(?:[.,]\d+)?)x?$""",
+        pattern = """^(?:set\s+)?(?:(zoom|z)(?:\s*:\s*|\s+)(.+)|(reinzoomen|zoomin|rauszoomen|zoomout)(?:(?:\s*:\s*|\s+)(.*))?)$""",
         option = RegexOption.IGNORE_CASE,
     )
+
+    private val zoomWordSet = setOf(
+        "move", "shift", "pan", "verschiebe",
+        "zoom", "z", "reinzoomen", "zoomin", "rauszoomen", "zoomout",
+        "in", "rein", "out", "raus", "to", "bis", "->",
+    )
+
+    private fun formatZoomNumber(z: Float): String {
+        val rounded = (z * 100f).roundToInt() / 100f
+        return if (rounded == rounded.toInt().toFloat()) "${rounded.toInt()}" else rounded.toString()
+    }
+
+    /**
+     * Wandelt einen einzelnen Zoom-Wert (`1,8`, `1.8x`, `50%`, `0,2`, `150`) in einen Faktor (0.1x..5.0x) um.
+     * Relative Werte mit `+`/`-` werden bewusst abgewiesen (die behandelt [parseRelativeOrAbsoluteZoom]).
+     */
+    internal fun parseZoomFactor(token: String): Float? {
+        val clean = token.trim().lowercase().replace(",", ".")
+        if (clean.isEmpty() || clean.startsWith("+") || clean.startsWith("-")) return null
+        val hasPercent = clean.endsWith("%")
+        val value = clean.removeSuffix("%").removeSuffix("x").toFloatOrNull() ?: return null
+        if (!value.isFinite() || value <= 0f) return null
+        val factor = if (hasPercent || value > 5f) value / 100f else value
+        return factor.coerceIn(0.1f, 5.0f)
+    }
+
+    /** Parst relative (`+0.2`, `-50%`) und absolute (`0.5`, `1.8`) Zoom-Angaben für den Einzelbefehl `zoom`. */
+    internal fun parseRelativeOrAbsoluteZoom(raw: String, currentZoom: Float): Float? {
+        val clean = raw.trim().lowercase().replace(",", ".")
+        if (clean.isEmpty()) return null
+        if (clean.startsWith("+") || clean.startsWith("-")) {
+            val sign = if (clean.startsWith("-")) -1f else 1f
+            val body = clean.drop(1).trim()
+            val hasPercent = body.endsWith("%")
+            val value = body.removeSuffix("%").removeSuffix("x").toFloatOrNull() ?: return null
+            if (!value.isFinite()) return null
+            val delta = if (hasPercent) value / 100f else value
+            return (currentZoom + sign * delta).coerceIn(0.1f, 5.0f)
+        }
+        return parseZoomFactor(clean)
+    }
+
+    /**
+     * Parst Zoom-Spezifikationen für statischen oder animierten Zoom:
+     * - `1,8` / `0,5` / `50%` → statischer Zoom `(f, null)`
+     * - `1 -> 2` / `0,2 - 1,0` / `0,5 bis 1,5` → animierter Zoom `(a, b)`
+     * - `in` / `rein` [+ optionaler Faktor] → Reinzoomen (Standard `1.0 -> 1.8`, bei `< 1.0` von klein in der Mitte auf `1.0`)
+     * - `out` / `raus` [+ optionaler Faktor] → Rauszoomen (Standard `1.8 -> 1.0`, bei `< 1.0` von `1.0` auf klein in der Mitte)
+     */
+    internal fun parseZoomSpec(raw: String, currentStartZoom: Float = 1.0f): Pair<Float, Float?>? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty() || trimmed.startsWith("+") || trimmed.startsWith("-")) return null
+
+        var normalized = trimmed
+            .replace(Regex("""\s*(?:->|→|\.\.)\s*"""), " -> ")
+            .replace(Regex("""\s+(?:to|bis)\s+""", RegexOption.IGNORE_CASE), " -> ")
+            .replace(Regex("""(?<=[0-9%x])\s*-\s*(?=[0-9])""", RegexOption.IGNORE_CASE), " -> ")
+        val hasArrow = normalized.contains(" -> ")
+        val tokens = normalized.split(Regex("""\s+""")).filter { it.isNotEmpty() && it != "->" }
+        if (tokens.isEmpty()) return null
+
+        val firstLower = tokens.first().lowercase()
+        val dir = when (firstLower) {
+            "in", "rein", "zoomin", "reinzoomen" -> "in"
+            "out", "raus", "zoomout", "rauszoomen" -> "out"
+            else -> null
+        }
+        val rest = if (dir != null) tokens.drop(1) else tokens
+        val factors = rest.map { parseZoomFactor(it) ?: return null }
+        if (factors.size > 2) return null
+
+        return when {
+            factors.size == 2 -> factors[0] to factors[1]
+            dir == "in" && factors.isEmpty() -> {
+                if (currentStartZoom < 0.99f) currentStartZoom to 1.0f else 1.0f to 1.8f
+            }
+            dir == "in" && factors.size == 1 -> {
+                val f = factors[0]
+                when {
+                    f > 1.0f -> 1.0f to f
+                    f < 1.0f -> f to 1.0f
+                    else -> 0.2f to 1.0f
+                }
+            }
+            dir == "out" && factors.isEmpty() -> {
+                if (currentStartZoom > 1.05f) currentStartZoom to 1.0f else 1.8f to 1.0f
+            }
+            dir == "out" && factors.size == 1 -> {
+                val f = factors[0]
+                when {
+                    f < 1.0f -> 1.0f to f
+                    f > 1.0f -> f to 1.0f
+                    else -> 1.8f to 1.0f
+                }
+            }
+            dir == null && factors.size == 1 && !hasArrow -> factors[0] to null
+            else -> null
+        }
+    }
+
+    /**
+     * Führt einen (optional zeitgebundenen oder animierten) Zoom-Befehl aus.
+     * Statische Zooms auf `all` aktualisieren den globalen Transform; animierte oder zeitgebundene
+     * Zooms werden als [TimedFormatSpan] über das Zeitfenster gelegt.
+     */
+    private fun executeZoomStatement(
+        rangeToken: String,
+        rawPayload: String,
+        engine: ProjectEngine,
+        scopedOnly: Boolean = false,
+    ): String? {
+        val range = parseTimeRange(rangeToken, engine)
+        val baseZoom = if (range.isAll) engine.project.transform.zoom else engine.currentTransform(range.startMs).zoom
+        val (zoomStart, zoomEnd) = parseZoomSpec(rawPayload, baseZoom) ?: return null
+
+        if (zoomEnd == null && range.isAll && !scopedOnly) {
+            engine.setZoomAndPan(zoom = zoomStart, clearTimedZoom = true)
+            return "Zoom auf ${engine.project.transform.zoom}x gesetzt."
+        }
+
+        val spanStart = if (range.isAll) engine.project.trimStartMs else range.startMs
+        val spanEnd = if (range.isAll) maxOf(engine.project.trimEndMs, spanStart + 400L) else range.endMs
+        val span = TimedFormatSpan(
+            id = uniqueId("fmt"),
+            startMs = spanStart,
+            endMs = spanEnd,
+            hasCustomRatio = false,
+            zoom = zoomStart,
+            zoomEnd = zoomEnd,
+        )
+        val neededDuration = maxOf(engine.project.sourceDurationMs, spanEnd)
+        val desc = if (zoomEnd != null) {
+            "Zoom ${formatZoomNumber(zoomStart)}x -> ${formatZoomNumber(zoomEnd)}x"
+        } else {
+            "Zoom ${formatZoomNumber(zoomStart)}x"
+        }
+        engine.commitChange("$desc (${ProjectEngine.formatSec(spanStart)}-${ProjectEngine.formatSec(spanEnd)})") { p ->
+            p.copy(
+                sourceDurationMs = neededDuration,
+                trimEndMs = if (p.trimEndMs < spanEnd && !range.isAll) spanEnd else p.trimEndMs,
+                timedFormatSpans = mergeTimedFormatSpans(p.timedFormatSpans, listOf(span)),
+            )
+        }
+        engine.playheadMs = spanStart
+        return "$desc (${ProjectEngine.formatSec(spanStart)}–${ProjectEngine.formatSec(spanEnd)})."
+    }
+
+    /**
+     * Führt neue Spans in bestehende ein: haben zwei Spans exakt denselben Zeitbereich (`startMs..endMs`),
+     * werden die neuen Eigenschaften in den vorhandenen Span gemischt, statt Duplikate anzuhäufen.
+     */
+    private fun mergeTimedFormatSpans(
+        existing: List<TimedFormatSpan>,
+        added: List<TimedFormatSpan>,
+    ): List<TimedFormatSpan> {
+        val result = existing.toMutableList()
+        for (span in added) {
+            val matchIndex = result.indexOfLast { it.startMs == span.startMs && it.endMs == span.endMs }
+            if (matchIndex >= 0) {
+                val prev = result[matchIndex]
+                result[matchIndex] = prev.copy(
+                    ratioWidth = if (span.hasCustomRatio) span.ratioWidth else prev.ratioWidth,
+                    ratioHeight = if (span.hasCustomRatio) span.ratioHeight else prev.ratioHeight,
+                    hasCustomRatio = prev.hasCustomRatio || span.hasCustomRatio,
+                    cropLeft = span.cropLeft ?: prev.cropLeft,
+                    cropTop = span.cropTop ?: prev.cropTop,
+                    cropRight = span.cropRight ?: prev.cropRight,
+                    cropBottom = span.cropBottom ?: prev.cropBottom,
+                    panX = span.panX ?: prev.panX,
+                    panY = span.panY ?: prev.panY,
+                    zoom = span.zoom ?: prev.zoom,
+                    zoomEnd = if (span.zoom != null) span.zoomEnd else prev.zoomEnd,
+                    filterPreset = span.filterPreset ?: prev.filterPreset,
+                    blurRadiusPx = span.blurRadiusPx ?: prev.blurRadiusPx,
+                )
+            } else {
+                result.add(span)
+            }
+        }
+        return result.takeLast(24)
+    }
 
     /**
      * Zerlegt den Teil hinter `if …:` in einzelne Befehle:
@@ -669,17 +904,43 @@ object PocketScriptParser {
         engine: ProjectEngine,
     ): String = splitConditionActions(actionBody).joinToString(" · ") { action ->
         val zoomMatch = scopedZoomRegex.matchEntire(action)
+        val zoomPayload = zoomMatch?.let { m ->
+            if (m.groupValues[1].isNotEmpty()) {
+                m.groupValues[2].trim()
+            } else {
+                val verb = m.groupValues[3].lowercase()
+                val dir = if (verb.startsWith("rein") || verb.startsWith("zoomin")) "in" else "out"
+                val arg = m.groupValues[4].trim()
+                if (arg.isEmpty()) dir else "$dir $arg"
+            }
+        }
+        val parsedZoom = zoomPayload?.let { payload ->
+            val baseZoom = ranges.firstOrNull()?.first?.let { engine.currentTransform(it).zoom } ?: 1.0f
+            parseZoomSpec(payload, baseZoom)
+        }
         val combined = buildCombinedScopedCommand(ranges, action)
         when {
-            zoomMatch != null -> {
-                val zoom = (zoomMatch.groupValues[1].replace(",", ".").toFloatOrNull() ?: 1.5f).coerceIn(1.0f, 5.0f)
-                engine.commitChange("PocketScript Zoom ${zoom}x (${ranges.size} Zeitfenster)") { p ->
-                    val spans = ranges.map { (startMs, endMs) ->
-                        TimedFormatSpan(id = uniqueId("fmt"), startMs = startMs, endMs = endMs, hasCustomRatio = false, zoom = zoom)
-                    }
-                    p.copy(timedFormatSpans = (p.timedFormatSpans + spans).takeLast(24))
+            parsedZoom != null -> {
+                val (zoomStart, zoomEnd) = parsedZoom
+                val label = if (zoomEnd != null) {
+                    "Zoom ${formatZoomNumber(zoomStart)}x -> ${formatZoomNumber(zoomEnd)}x"
+                } else {
+                    "Zoom ${formatZoomNumber(zoomStart)}x"
                 }
-                "Zoom ${zoom}x nur in ${ranges.size} Zeitfenster(n)"
+                engine.commitChange("PocketScript $label (${ranges.size} Zeitfenster)") { p ->
+                    val spans = ranges.map { (startMs, endMs) ->
+                        TimedFormatSpan(
+                            id = uniqueId("fmt"),
+                            startMs = startMs,
+                            endMs = endMs,
+                            hasCustomRatio = false,
+                            zoom = zoomStart,
+                            zoomEnd = zoomEnd,
+                        )
+                    }
+                    p.copy(timedFormatSpans = mergeTimedFormatSpans(p.timedFormatSpans, spans))
+                }
+                "$label nur in ${ranges.size} Zeitfenster(n)"
             }
             combined != null ->
                 tryParseAndExecuteFormatAndCrop(combined, engine, scopedOnly = true) ?: engine.executeCommand(action)
@@ -693,19 +954,19 @@ object PocketScriptParser {
     ): String? {
         val bodyTrimmed = actionBody.trim()
         val tokens = bodyTrimmed.split(Regex("\\s+"))
-        // Prüfen, ob actionBody ein Format `(9:16)`, Kanten-Cut `u20%` oder Move `move 10%l` ist
+        val hasZoomWord = tokens.any { it.lowercase() in setOf("zoom", "z", "reinzoomen", "zoomin", "rauszoomen", "zoomout") }
+        // Prüfen, ob actionBody aus Format `(9:16)`, Kanten-Cut `u20%`, Move `move 10%l` oder Zoom `zoom in` besteht
         if (tokens.all {
                 ratioTokenRegex.matches(it) ||
                     edgeCropTokenRegex.matches(it) ||
                     moveSuffixTokenRegex.matches(it) ||
                     movePrefixTokenRegex.matches(it) ||
-                    it.lowercase() in listOf("move", "shift", "pan", "verschiebe")
+                    it.lowercase() in zoomWordSet ||
+                    (hasZoomWord && parseZoomSpec(it) != null)
             }
         ) {
             return ranges.joinToString(" ") { (startMs, endMs) ->
-                val startSec = startMs / 1000.0
-                val endSec = endMs / 1000.0
-                "${formatSecNumber(startSec)}-${formatSecNumber(endSec)} $bodyTrimmed"
+                "${formatSecNumber(startMs)}-${formatSecNumber(endMs)} $bodyTrimmed"
             }
         }
         return null
@@ -717,18 +978,19 @@ object PocketScriptParser {
         actionBody: String,
         engine: ProjectEngine,
     ): String {
-        val rangePrefix = "${formatSecNumber(startMs / 1000.0)}-${formatSecNumber(endMs / 1000.0)}"
+        val rangePrefix = "${formatSecNumber(startMs)}-${formatSecNumber(endMs)}"
         val body = actionBody.trim()
         val withRange = "$rangePrefix $body"
         return tryExecuteScript(withRange, engine) ?: engine.executeCommand(body)
     }
 
-    private fun formatSecNumber(sec: Double): String {
-        val roundedTenths = (sec * 10.0).roundToInt()
-        return if (roundedTenths % 10 == 0) {
-            "${roundedTenths / 10}"
+    /** Formatiert Millisekunden einheitlich auf Zehntelsekunden (wie [ProjectEngine.formatSec], ohne `s`). */
+    private fun formatSecNumber(ms: Long): String {
+        val totalTenths = (ms / 100L).coerceAtLeast(0L)
+        return if (totalTenths % 10L == 0L) {
+            "${totalTenths / 10L}"
         } else {
-            "${roundedTenths / 10}.${roundedTenths % 10}"
+            "${totalTenths / 10L}.${totalTenths % 10L}"
         }
     }
 
@@ -753,9 +1015,19 @@ object PocketScriptParser {
             Regex("""\(\s*(\d+(?:[.,]\d+)?)\s*([:/x])\s*(\d+(?:[.,]\d+)?)\s*\)"""),
             "($1$2$3)",
         )
-        // Leerzeichen um Bindestrich bei Zeitbereichen `10 - 24,3` -> `10-24,3` normalisieren
+        // Pfeile und `to`/`bis` für Zoom-Bereiche `1 -> 2` / `1 to 2` / `50% - 150%` zusammenziehen
+        normalized = normalized.replace(Regex("""\s*(?:->|→)\s*"""), "->")
         normalized = normalized.replace(
-            Regex("""(\d+(?::\d+)+|\d+(?:[.,]\d+)?)\s*-\s*(\d+(?::\d+)+|\d+(?:[.,]\d+)?)"""),
+            Regex("""(\d+(?:[.,]\d+)?%?x?)\s+(?:to|bis)\s+(\d+(?:[.,]\d+)?%?x?)""", RegexOption.IGNORE_CASE),
+            "$1->$2",
+        )
+        normalized = normalized.replace(
+            Regex("""(\d+(?:[.,]\d+)?%x?)\s*-\s*(\d+(?:[.,]\d+)?%?x?)""", RegexOption.IGNORE_CASE),
+            "$1->$2",
+        )
+        // Leerzeichen um Bindestrich bei Zeitbereichen `10 - 24,3` / `00:10.5 - 00:33.3` -> `10-24,3` normalisieren
+        normalized = normalized.replace(
+            Regex("""($TIME_ATOM)\s*-\s*($TIME_ATOM)"""),
             "$1-$2",
         )
         // Leerzeichen zwischen Prozentzahl und Richtungs-Suffix `10% lower` / `10% l` / `10% up` -> `10%lower` / `10%l`
@@ -776,10 +1048,44 @@ object PocketScriptParser {
         var current = FormatAndCropSegment(timeToken = "all")
         var nextTokenIsMove = false
 
-        for (token in tokens) {
+        var idx = 0
+        while (idx < tokens.size) {
+            val token = tokens[idx]
             val lowerTok = token.lowercase()
             if (lowerTok in listOf("move", "shift", "pan", "verschiebe")) {
                 nextTokenIsMove = true
+                idx++
+                continue
+            }
+
+            if (lowerTok in listOf("zoom", "z", "reinzoomen", "zoomin", "rauszoomen", "zoomout")) {
+                nextTokenIsMove = false
+                val rangeSoFar = parseTimeRange(current.timeToken, engine)
+                val baseZoom = if (rangeSoFar.isAll) engine.project.transform.zoom else engine.currentTransform(rangeSoFar.startMs).zoom
+                if (lowerTok in listOf("reinzoomen", "zoomin", "rauszoomen", "zoomout")) {
+                    val dir = if (lowerTok.startsWith("rein") || lowerTok.startsWith("zoomin")) "in" else "out"
+                    val nextTok = tokens.getOrNull(idx + 1)
+                    val twoSpec = if (nextTok != null) parseZoomSpec("$dir $nextTok", baseZoom) else null
+                    val spec = twoSpec ?: parseZoomSpec(dir, baseZoom) ?: return null
+                    current.zoomStart = spec.first
+                    current.zoomEnd = spec.second
+                    idx += if (twoSpec != null) 2 else 1
+                } else {
+                    val t1 = tokens.getOrNull(idx + 1) ?: return null
+                    val t2 = tokens.getOrNull(idx + 2)
+                    if (t1.lowercase() in listOf("in", "rein", "out", "raus")) {
+                        val twoSpec = if (t2 != null) parseZoomSpec("$t1 $t2", baseZoom) else null
+                        val spec = twoSpec ?: parseZoomSpec(t1, baseZoom) ?: return null
+                        current.zoomStart = spec.first
+                        current.zoomEnd = spec.second
+                        idx += if (twoSpec != null) 3 else 2
+                    } else {
+                        val spec = parseZoomSpec(t1, baseZoom) ?: return null
+                        current.zoomStart = spec.first
+                        current.zoomEnd = spec.second
+                        idx += 2
+                    }
+                }
                 continue
             }
 
@@ -836,10 +1142,11 @@ object PocketScriptParser {
                     }
                 }
                 else -> {
-                    // Unbekanntes Token -> kein reiner Format-/Kanten-Cut-/Move-Ausdruck
+                    // Unbekanntes Token -> kein reiner Format-/Kanten-Cut-/Move-/Zoom-Ausdruck
                     return null
                 }
             }
+            idx++
         }
 
         if (current.hasModifiers) {
@@ -860,10 +1167,13 @@ object PocketScriptParser {
         var updatedGlobalBottom = engine.project.transform.cropBottom
         var updatedGlobalPanX = engine.project.transform.panX
         var updatedGlobalPanY = engine.project.transform.panY
+        var updatedGlobalZoom = engine.project.transform.zoom
         var shouldUpdateGlobalCrop = false
+        var shouldUpdateGlobalZoom = false
         var clearTimedCropOverrides = false
+        var clearTimedZoomOverrides = false
 
-        for ((idx, seg) in segments.withIndex()) {
+        for (seg in segments) {
             val range = parseTimeRange(seg.timeToken, engine)
             if (range.endMs > maxEndRequired) {
                 maxEndRequired = range.endMs
@@ -879,22 +1189,30 @@ object PocketScriptParser {
             val hasRatio = seg.ratioW != null && seg.ratioH != null
             val hasEdgeCrop = cropLeftVal != null || cropTopVal != null || cropRightVal != null || cropBottomVal != null
             val hasMove = panXVal != null || panYVal != null
+            val hasZoom = seg.zoomStart != null
+            val isTimedZoom = hasZoom && (seg.zoomEnd != null || !range.isAll || scopedOnly)
+            val isGlobalStaticZoom = hasZoom && seg.zoomEnd == null && range.isAll && !scopedOnly
 
-            if (hasRatio || (!range.isAll && (hasEdgeCrop || hasMove))) {
+            if (hasRatio || (!range.isAll && (hasEdgeCrop || hasMove)) || (scopedOnly && (hasEdgeCrop || hasMove)) || isTimedZoom) {
+                val spanStart = if (range.isAll && isTimedZoom && !hasRatio) engine.project.trimStartMs else range.startMs
+                val spanEnd = if (range.isAll && isTimedZoom && !hasRatio) maxOf(engine.project.trimEndMs, spanStart + 400L) else range.endMs
+                val applyCropInSpan = !range.isAll || scopedOnly
                 newSpans.add(
                     TimedFormatSpan(
                         id = uniqueId("fmt"),
-                        startMs = range.startMs,
-                        endMs = range.endMs,
+                        startMs = spanStart,
+                        endMs = spanEnd,
                         ratioWidth = seg.ratioW ?: 9f,
                         ratioHeight = seg.ratioH ?: 16f,
                         hasCustomRatio = hasRatio,
-                        cropLeft = cropLeftVal,
-                        cropTop = cropTopVal,
-                        cropRight = cropRightVal,
-                        cropBottom = cropBottomVal,
-                        panX = panXVal,
-                        panY = panYVal,
+                        cropLeft = if (applyCropInSpan) cropLeftVal else null,
+                        cropTop = if (applyCropInSpan) cropTopVal else null,
+                        cropRight = if (applyCropInSpan) cropRightVal else null,
+                        cropBottom = if (applyCropInSpan) cropBottomVal else null,
+                        panX = if (applyCropInSpan) panXVal else null,
+                        panY = if (applyCropInSpan) panYVal else null,
+                        zoom = if (isTimedZoom) seg.zoomStart else null,
+                        zoomEnd = if (isTimedZoom) seg.zoomEnd else null,
                     ),
                 )
             }
@@ -905,13 +1223,17 @@ object PocketScriptParser {
                 globalPreset = matchClosestAspectPreset(seg.ratioW ?: 9f, seg.ratioH ?: 16f)
             }
 
+            if (isGlobalStaticZoom) {
+                updatedGlobalZoom = seg.zoomStart!!
+                shouldUpdateGlobalZoom = true
+                clearTimedZoomOverrides = true
+            }
+
             // Nur `all` (oder gar keine Zeitangabe: `u20%`, `move 10%l`) ändert den Basis-Transform des ganzen
             // Videos. Mit Zeitbereich (`0-2 u20%`, `90 u90%`) gilt der Zuschnitt ausschließlich in diesem Fenster.
-            if ((hasEdgeCrop || hasMove) && range.isAll) {
+            if ((hasEdgeCrop || hasMove) && range.isAll && !scopedOnly) {
                 shouldUpdateGlobalCrop = true
-                if (range.isAll) {
-                    clearTimedCropOverrides = true
-                }
+                clearTimedCropOverrides = true
                 if (cropLeftVal != null) {
                     updatedGlobalLeft = cropLeftVal
                     if (updatedGlobalRight <= updatedGlobalLeft + 0.02f) {
@@ -966,6 +1288,14 @@ object PocketScriptParser {
                     descTokens.add("move ${(-it).roundToInt()}%left (links)")
                 }
             }
+            seg.zoomStart?.let { zStart ->
+                val zEnd = seg.zoomEnd
+                if (zEnd != null) {
+                    descTokens.add("zoom ${formatZoomNumber(zStart)}x->${formatZoomNumber(zEnd)}x")
+                } else {
+                    descTokens.add("zoom ${formatZoomNumber(zStart)}x")
+                }
+            }
 
             val timeLabel = if (range.isAll) "all" else "${ProjectEngine.formatSec(range.startMs)}-${ProjectEngine.formatSec(range.endMs)}"
             summaryParts.add("$timeLabel ${descTokens.joinToString(" ")}")
@@ -974,15 +1304,17 @@ object PocketScriptParser {
         val summary = summaryParts.joinToString(", ")
 
         engine.commitChange("PocketScript Schnitt: $summary") { p ->
-            val cleanedExisting = if (clearTimedCropOverrides) {
+            val cleanedExisting = if (clearTimedCropOverrides || clearTimedZoomOverrides) {
                 p.timedFormatSpans.mapNotNull { old ->
                     val stripped = old.copy(
-                        cropLeft = if (segments.any { it.cutLeftPct != null }) null else old.cropLeft,
-                        cropTop = if (segments.any { it.cutTopPct != null }) null else old.cropTop,
-                        cropRight = if (segments.any { it.cutRightPct != null }) null else old.cropRight,
-                        cropBottom = if (segments.any { it.cutBottomPct != null }) null else old.cropBottom,
-                        panX = if (segments.any { it.moveXPct != null }) null else old.panX,
-                        panY = if (segments.any { it.moveYPct != null }) null else old.panY,
+                        cropLeft = if (clearTimedCropOverrides && segments.any { it.cutLeftPct != null }) null else old.cropLeft,
+                        cropTop = if (clearTimedCropOverrides && segments.any { it.cutTopPct != null }) null else old.cropTop,
+                        cropRight = if (clearTimedCropOverrides && segments.any { it.cutRightPct != null }) null else old.cropRight,
+                        cropBottom = if (clearTimedCropOverrides && segments.any { it.cutBottomPct != null }) null else old.cropBottom,
+                        panX = if (clearTimedCropOverrides && segments.any { it.moveXPct != null }) null else old.panX,
+                        panY = if (clearTimedCropOverrides && segments.any { it.moveYPct != null }) null else old.panY,
+                        zoom = if (clearTimedZoomOverrides) null else old.zoom,
+                        zoomEnd = if (clearTimedZoomOverrides) null else old.zoomEnd,
                     )
                     if (!stripped.hasCustomRatio &&
                         stripped.cropLeft == null &&
@@ -990,7 +1322,10 @@ object PocketScriptParser {
                         stripped.cropRight == null &&
                         stripped.cropBottom == null &&
                         stripped.panX == null &&
-                        stripped.panY == null
+                        stripped.panY == null &&
+                        stripped.zoom == null &&
+                        stripped.filterPreset == null &&
+                        stripped.blurRadiusPx == null
                     ) {
                         null
                     } else {
@@ -1001,8 +1336,8 @@ object PocketScriptParser {
                 p.timedFormatSpans
             }
 
-            val mergedSpans = (cleanedExisting + newSpans).takeLast(24)
-            val nextTransform = if (shouldUpdateGlobalCrop) {
+            val mergedSpans = mergeTimedFormatSpans(cleanedExisting, newSpans)
+            val nextTransform = if (shouldUpdateGlobalCrop || shouldUpdateGlobalZoom) {
                 p.transform.copy(
                     cropLeft = updatedGlobalLeft.coerceIn(0f, 0.98f),
                     cropTop = updatedGlobalTop.coerceIn(0f, 0.98f),
@@ -1010,6 +1345,7 @@ object PocketScriptParser {
                     cropBottom = updatedGlobalBottom.coerceIn((updatedGlobalTop + 0.02f).coerceAtMost(1f), 1f),
                     panX = updatedGlobalPanX.coerceIn(-0.95f, 0.95f),
                     panY = updatedGlobalPanY.coerceIn(-0.95f, 0.95f),
+                    zoom = updatedGlobalZoom.coerceIn(0.1f, 5.0f),
                 )
             } else {
                 p.transform
@@ -1099,10 +1435,19 @@ object PocketScriptParser {
                     endMs = range.endMs,
                 )
                 engine.commitChange("Text '${styled.cleanText}' (${ProjectEngine.formatSec(range.startMs)}-${ProjectEngine.formatSec(range.endMs)})") { p ->
+                    // Duplikate im selben Zeitfenster (z.B. beim erneuten Ausführen eines Skripts) aktualisieren
+                    val filtered = p.overlays.filterNot {
+                        it.kind == OverlayKind.TEXT &&
+                            it.startMs == overlay.startMs &&
+                            it.endMs == overlay.endMs &&
+                            (it.content == overlay.content ||
+                                (kotlin.math.abs(it.xPercent - overlay.xPercent) < 0.005f &&
+                                    kotlin.math.abs(it.yPercent - overlay.yPercent) < 0.005f))
+                    }
                     p.copy(
                         sourceDurationMs = neededDuration,
                         trimEndMs = maxOf(p.trimEndMs, range.endMs),
-                        overlays = p.overlays + overlay,
+                        overlays = filtered + overlay,
                     )
                 }
                 engine.selectedOverlayId = overlay.id
@@ -1124,10 +1469,18 @@ object PocketScriptParser {
                     endMs = range.endMs,
                 )
                 engine.commitChange("Emoji ${styled.cleanText} (${ProjectEngine.formatSec(range.startMs)}-${ProjectEngine.formatSec(range.endMs)})") { p ->
+                    val filtered = p.overlays.filterNot {
+                        it.kind == OverlayKind.EMOJI &&
+                            it.startMs == overlay.startMs &&
+                            it.endMs == overlay.endMs &&
+                            (it.content == overlay.content ||
+                                (kotlin.math.abs(it.xPercent - overlay.xPercent) < 0.005f &&
+                                    kotlin.math.abs(it.yPercent - overlay.yPercent) < 0.005f))
+                    }
                     p.copy(
                         sourceDurationMs = neededDuration,
                         trimEndMs = maxOf(p.trimEndMs, range.endMs),
-                        overlays = p.overlays + overlay,
+                        overlays = filtered + overlay,
                     )
                 }
                 engine.selectedOverlayId = overlay.id
@@ -1136,9 +1489,8 @@ object PocketScriptParser {
             }
 
             "zoom" -> {
-                val z = styled.cleanText.replace(",", ".").toFloatOrNull() ?: 1.5f
-                engine.setZoomAndPan(zoom = z)
-                "Zoom auf ${engine.project.transform.zoom}x gesetzt."
+                executeZoomStatement(rangeToken, rawPayload, engine)
+                    ?: "Syntax: zoom <0.1 - 5.0 | in | out | 1 -> 2>, z.B. '0-5 set zoom: in'"
             }
 
             "filter", "fx" -> {
@@ -1295,7 +1647,12 @@ object PocketScriptParser {
         if (clean.contains("-")) {
             val parts = clean.split("-", limit = 2)
             val startMs = parseSecondsToMs(parts[0])
-            val endMs = parseSecondsToMs(parts[1]).coerceAtLeast(startMs + 400L)
+            var endMs = parseSecondsToMs(parts[1]).coerceAtLeast(startMs + 400L)
+            // Wenn die eingegebene Endzeit (z.B. 53.3) auf Zehntelsekunden genau der Videolänge (53358ms)
+            // entspricht, auf das echte Ende einrasten, damit am Schluss keine Lücke entsteht.
+            if (endMs < totalMs && endMs / 100L == totalMs / 100L) {
+                endMs = totalMs
+            }
             return ParsedTimeRange(startMs, endMs, isAll = false)
         }
 
@@ -1322,10 +1679,10 @@ object PocketScriptParser {
                 }
                 else -> 0.0
             }
-            return (totalSeconds * 1000.0).toLong().coerceAtLeast(0L)
+            return (totalSeconds * 1000.0).roundToLong().coerceAtLeast(0L)
         }
         val seconds = normalized.toDoubleOrNull() ?: 0.0
-        return (seconds * 1000.0).toLong().coerceAtLeast(0L)
+        return (seconds * 1000.0).roundToLong().coerceAtLeast(0L)
     }
 
     private fun matchClosestAspectPreset(w: Float, h: Float): AspectRatioPreset {
@@ -1383,12 +1740,25 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
+            title = "1a. Rein- und Rauszoomen (zoom in, zoom out, 0.1x–5.0x)",
+            codeExamples = listOf(
+                "zoom in" to "Zoomt animiert von der Mitte her größer (1.0x -> 1.8x über den ganzen Clip).",
+                "0-4 zoom in 0,2" to "Startet ganz klein in der Mitte (20 %) und macht das Video bis Sekunde 4 voll groß (100 %).",
+                "0-4 zoom in 2,0" to "Zoomt in den ersten 4 Sekunden aus der Mitte von 1.0x auf 2.0x hinein.",
+                "zoom out" to "Zoomt animiert wieder heraus (1.8x -> 1.0x über den ganzen Clip).",
+                "0-4 zoom out 0,5" to "Zoomt in den ersten 4 Sekunden von voller Größe (100 %) auf 50 % in die Mitte heraus.",
+                "0-3 zoom 1 -> 2" to "Animierter Zoom mit frei wählbarem Start- und Endfaktor (auch 2 -> 1 oder 0,3 -> 1,5).",
+                "2-6 zoom 1,8" to "Statischer Zoom auf 1.8x nur von Sekunde 2 bis 6 (fürs ganze Video: zoom 1,8 oder zoom 0,5).",
+                "if caption red: zoom in" to "Zoomt animiert hinein, solange der rote Untertitel läuft (auch mit while text red).",
+            ),
+        ),
+        ManualSection(
             title = "2. Schnittmarken (set cut) & Dahinter/Davor löschen (delete)",
             codeExamples = listOf(
-                "set cut 00:48" to "Setzt Schnittmarke cut1 exakt bei Minute 00:48 (48 Sekunden).",
+                "set cut 00:33.3" to "Setzt Schnittmarke cut1 exakt bei 00:33.3 (Zehntelsekunden-Genauigkeit überall einheitlich).",
                 "delete after cut1" to "Löscht das gesamte Videomaterial hinter Schnittmarke cut1.",
                 "delete before cut1" to "Löscht das gesamte Videomaterial vor Schnittmarke cut1.",
-                "set cut2 01:15" to "Setzt eine zweite Schnittmarke cut2 bei 01:15.",
+                "set cut2 01:15.5" to "Setzt eine zweite Schnittmarke cut2 bei 01:15.5.",
                 "delete between cut1 cut2" to "Schneidet das Stück zwischen cut1 und cut2 heraus (wird übersprungen).",
                 "delete 10-20" to "Schneidet Sekunde 10 bis 20 aus der Mitte des Videos heraus.",
             ),
@@ -1468,9 +1838,10 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
-            title = "4. Grundprinzip: Zeitbereiche & Kommazahlen",
+            title = "4. Grundprinzip: Zeitbereiche & Kommazahlen (überall auf 0,1 s genau)",
             codeExamples = listOf(
                 "10-24,3" to "Von Sekunde 10,0 bis Sekunde 24,3 schneiden (Komma oder Punkt erlaubt).",
+                "00:10.5-00:24.3" to "Minuten:Sekunden mit Zehntelsekunden – funktioniert überall gleich genau (set cut, trim, delete, set text).",
                 "8-10" to "Zeitfenster von Sekunde 8 bis Sekunde 10.",
                 "9" to "Einzelne Startzeit: gilt ab Sekunde 9 bis zum Clip-Ende.",
                 "all" to "Wendet den Befehl auf das gesamte Video an (alle Sekunden).",
@@ -1508,12 +1879,16 @@ object PocketScriptPdfManualGenerator {
             ),
         ),
         ManualSection(
-            title = "7. Verfügbare Punkt-Modifier & Effekte",
+            title = "7. Verfügbare Punkt-Modifier & Effekte (inkl. Rein-/Rauszoomen)",
             codeExamples = listOf(
                 ".red .rot .pink .blue .blau .cyan" to "Textfarben: Rot, Pink, Blau, Cyan/Türkis.",
                 ".green .gruen .yellow .gelb .gold .orange" to "Textfarben: Grün, Gelb, Gold, Orange.",
                 ".sans .serif .mono .cursive .impact" to "Schriftart direkt im Befehl wechseln.",
-                "zoom 1,8" to "Zoomt stufenlos ins Video (1.0x bis 5.0x).",
+                "zoom in" to "Zoomt animiert von der Mitte her größer (auch 0-5 zoom in 0,2 oder 0-5 zoom in 2,0).",
+                "zoom out" to "Zoomt animiert wieder kleiner (auch zoom out 0,5 für Verkleinerung zur Mitte hin).",
+                "0-3 zoom 1 -> 2" to "Animierter Zoom von Faktor 1.0x auf 2.0x in den ersten 3 Sekunden.",
+                "zoom 0,5" to "Statischer Zoom auf 50 % (klein in der Mitte) bis 5,0 (500 %).",
+                "zoom 1,8" to "Zoomt stufenlos ins Video (0.1x bis 5.0x).",
                 "all set filter: cyberpunk" to "Aktiviert den Look-Filter (cyberpunk, cinematic, bw, vintage, vivid).",
                 "undo" to "Macht den letzten Schritt rückgängig (redo stellt ihn wieder her).",
                 "demo" to "Baut aus dem geladenen Video einen Vorführ-Clip, der jede Funktion in einem eigenen Kapitel zeigt (als Kopie 'PocketCraft Demo').",

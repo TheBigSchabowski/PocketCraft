@@ -351,4 +351,159 @@ class PocketScriptLanguageTest {
             assertEquals(noir[col], noir[10 + col], 0.0001f)
         }
     }
+
+    @Test
+    fun animatedZoomInOutAndStaticZoomOutInterpolateFromCenter() {
+        // 0-4 zoom in -> 1.0x bis 1.8x
+        val e1 = engine()
+        e1.executeCommand("0-4 zoom in")
+        assertEquals(1.0f, e1.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.4f, e1.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(1.8f, e1.currentTransform(4_000L).zoom, 0.01f)
+        assertEquals(1.0f, e1.currentTransform(6_000L).zoom, 0.01f)
+
+        // 0-4 zoom in 0,2 -> startet klein in der Mitte (0.2x) und vergrößert auf 1.0x
+        val e2 = engine()
+        e2.executeCommand("0-4 zoom in 0,2")
+        assertEquals(0.2f, e2.currentTransform(0L).zoom, 0.01f)
+        assertEquals(0.6f, e2.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(1.0f, e2.currentTransform(4_000L).zoom, 0.01f)
+
+        // 0-4 zoom in 2,0 -> 1.0x bis 2.0x
+        val e3 = engine()
+        e3.executeCommand("0-4 zoom in 2,0")
+        assertEquals(1.0f, e3.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.5f, e3.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(2.0f, e3.currentTransform(4_000L).zoom, 0.01f)
+
+        // 0-4 zoom 1 -> 2
+        val e4 = engine()
+        e4.executeCommand("0-4 zoom 1 -> 2")
+        assertEquals(1.0f, e4.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.5f, e4.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(2.0f, e4.currentTransform(4_000L).zoom, 0.01f)
+
+        // 0-4 zoom out / zoom out 0,5 / zoom 2 -> 1
+        val e5 = engine()
+        e5.executeCommand("0-4 zoom out")
+        assertEquals(1.8f, e5.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.4f, e5.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(1.0f, e5.currentTransform(4_000L).zoom, 0.01f)
+
+        val e6 = engine()
+        e6.executeCommand("0-4 zoom out 0,5")
+        assertEquals(1.0f, e6.currentTransform(0L).zoom, 0.01f)
+        assertEquals(0.75f, e6.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(0.5f, e6.currentTransform(4_000L).zoom, 0.01f)
+
+        val e7 = engine()
+        e7.executeCommand("0-4 zoom 2 -> 1")
+        assertEquals(2.0f, e7.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.5f, e7.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(1.0f, e7.currentTransform(4_000L).zoom, 0.01f)
+
+        // Statischer Zoom-Out & zeitgebundener statischer Zoom
+        val e8 = engine()
+        e8.executeCommand("zoom 0,5")
+        assertEquals(0.5f, e8.project.transform.zoom, 0.01f)
+        assertEquals(0.5f, e8.currentTransform(3_000L).zoom, 0.01f)
+
+        val e9 = engine()
+        e9.executeCommand("2-6 zoom 1,8")
+        assertEquals(1.8f, e9.currentTransform(4_000L).zoom, 0.01f)
+        assertEquals(1.0f, e9.currentTransform(1_000L).zoom, 0.01f)
+
+        val e10 = engine()
+        e10.executeCommand("2-6 set zoom: 1,8")
+        assertEquals(1.8f, e10.currentTransform(4_000L).zoom, 0.01f)
+        assertEquals(1.0f, e10.currentTransform(1_000L).zoom, 0.01f)
+
+        // Bedingter animierter Zoom in `if` und `while`
+        val e11 = engine()
+        e11.executeCommand("0-4 set caption: Start.red")
+        e11.executeCommand("if caption red: zoom in")
+        assertEquals(1.0f, e11.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.4f, e11.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(1.8f, e11.currentTransform(4_000L).zoom, 0.01f)
+        assertEquals(1.0f, e11.currentTransform(8_000L).zoom, 0.01f)
+
+        val e12 = engine()
+        e12.executeCommand("0-4 set text: Highlight.red")
+        e12.executeCommand("while text red: zoom 1 -> 1,8")
+        assertEquals(1.0f, e12.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.4f, e12.currentTransform(2_000L).zoom, 0.01f)
+        assertEquals(1.8f, e12.currentTransform(4_000L).zoom, 0.01f)
+    }
+
+    @Test
+    fun uniformTenthSecondTimeParsingAndFormattingAcrossAllCommands() {
+        assertEquals("00:33.3", ProjectEngine.formatTimecode(33_300L))
+        assertEquals("33.3s", ProjectEngine.formatSec(33_300L))
+        assertEquals("00:33.3", ProjectEngine.formatTimecode(33_358L))
+        assertEquals("33.3s", ProjectEngine.formatSec(33_358L))
+
+        val e = ProjectEngine()
+        e.setVideoSource("/tmp/clip.mp4", 53_358L, "Clip")
+        assertEquals("53.3", e.executeCommand("print \$duration"))
+
+        e.executeCommand("set cut 00:33.3")
+        assertEquals(33_300L, e.project.cutMarkers.single().timeMs)
+        e.executeCommand("delete before cut1")
+        assertEquals(33_300L, e.project.trimStartMs)
+        assertEquals("33.3", e.executeCommand("print \$trimstart"))
+        assertEquals("53.3", e.executeCommand("print \$trimend"))
+
+        e.executeCommand("00:50-00:53.3 set text: Finale.red")
+        val txt = e.project.overlays.single { it.content == "Finale" }
+        assertEquals(50_000L, txt.startMs)
+        assertEquals(53_358L, txt.endMs) // rastet auf echte Videolänge ein
+
+        e.executeCommand("00:10.5-00:20.3 u20%")
+        assertEquals(0.80f, e.currentTransform(15_000L).cropBottom, 0.01f)
+        assertEquals(1.0f, e.currentTransform(25_000L).cropBottom, 0.01f)
+
+        e.executeCommand("delete 00:10.5-00:20.3")
+        assertEquals(10_500L, e.project.removedRanges.single().startMs)
+        assertEquals(20_300L, e.project.removedRanges.single().endMs)
+
+        e.executeCommand("trim 00:10.5 00:33.3")
+        assertEquals(10_500L, e.project.trimStartMs)
+        assertEquals(33_300L, e.project.trimEndMs)
+    }
+
+    @Test
+    fun rerunningPhoneScriptProducesNoDuplicateOverlaysOrSpans() {
+        val e = ProjectEngine()
+        e.setVideoSource("content://test/video.mp4", 53_358L, "Sample")
+        e.executeCommand("clear all")
+
+        val phoneScript = """
+            all u20%
+            all move 10%l
+            set cut 00:33.3
+            delete before cut1
+            while text red: r15% l15%
+            50-53.3 set text: Lasst uns einen schönen Abend starten (☞ ͡° ͜ʖ ͡°)☞.red
+        """.trimIndent()
+
+        repeat(3) {
+            val res = e.executeCommand(phoneScript)
+            assertFalse(e.commandHistory.last().isError, res)
+        }
+
+        val overlays = e.project.overlays.filter { it.kind == OverlayKind.TEXT }
+        assertEquals(1, overlays.size)
+        assertEquals(50_000L, overlays.single().startMs)
+        assertEquals(53_358L, overlays.single().endMs)
+
+        assertEquals(1, e.project.timedFormatSpans.size)
+        val span = e.project.timedFormatSpans.single()
+        assertEquals(50_000L, span.startMs)
+        assertEquals(53_358L, span.endMs)
+        assertEquals(0.15f, span.cropLeft ?: 0f, 0.001f)
+        assertEquals(0.85f, span.cropRight ?: 1f, 0.001f)
+        assertEquals(0.80f, e.currentTransform(51_000L).cropBottom, 0.001f)
+        assertEquals(0.10f, e.currentTransform(51_000L).panY, 0.001f)
+        assertEquals(33_300L, e.project.trimStartMs)
+    }
 }
