@@ -27,14 +27,16 @@ internal object OverlayCommands {
     private val moveVerbs = setOf("move", "pos", "position", "verschiebe", "schiebe")
     private val editVerbs = setOf("edit", "change", "ändere", "aendere", "bearbeite")
     private val sizeVerbs = setOf("size", "scale", "größe", "groesse", "grösse")
+    private val rotateVerbs = setOf("rotate", "rot", "spin", "turn", "drehen", "flip", "mirror")
 
     private const val MOVE_SYNTAX =
-        "Syntax: move text1 10%u (hoch) · 10%l (runter) · 10%r (rechts) · 10%left (links) · " +
-            "move text1 50 20 (x % von links, y % von oben) · move text1 top|center|bottom – 'texts' zeigt die Nummern."
+        "Syntax: move text1 down 10% · move text1 up 10% · move text1 50 20 · move text1 top|center|bottom – 'texts' zeigt die Nummern."
     private const val EDIT_SYNTAX =
-        "Syntax: edit text1: Neuer Text (mit Stil: edit text1: Neuer Text.red.big, nur Stil: edit text1: .gold) – 'texts' zeigt die Nummern."
+        "Syntax: edit text1: Neuer Text (mit Stil: edit text1: Neuer Text.red.big.spinaxis, nur Stil: edit text1: .gold) – 'texts' zeigt die Nummern."
     private const val SIZE_SYNTAX =
         "Syntax: size text1 150 (Prozent) · size text1 big|small|huge · size text1 +20 – 'texts' zeigt die Nummern."
+    private const val ROTATE_SYNTAX =
+        "Syntax: rotate text1 15 · rotate emoji1 y 0 -> 360 · spin emoji1 axis · spin emoji1 x 2x · flip emoji1 – 'texts'/'emojis' zeigt die Nummern."
 
     /** Führt [verb] aus, falls es ein Overlay-Befehl ist; sonst `null`. Ergebnis: Meldung + Fehler-Flag. */
     fun tryExecute(verb: String, rawArgs: String, engine: ProjectEngine): Pair<String, Boolean>? {
@@ -44,13 +46,14 @@ internal object OverlayCommands {
             verb in moveVerbs && startsWithReference(args) -> move(args, engine)
             verb in editVerbs -> edit(rawArgs.trim(), engine)
             verb in sizeVerbs -> size(args, engine)
+            verb in rotateVerbs && startsWithReference(args) -> rotate(verb, args, engine)
             else -> null
         }
     }
 
     // ------------------------------------------------------------------ Element ansprechen
 
-    private fun startsWithReference(args: List<String>): Boolean {
+    internal fun startsWithReference(args: List<String>): Boolean {
         val first = args.firstOrNull() ?: return false
         val word = if (first.lowercase() in allWords) args.getOrNull(1) ?: return false else first
         return kindWordRegex.matches(word.substringBefore(':'))
@@ -152,8 +155,20 @@ internal object OverlayCommands {
         val sorted = numbered(kinds, engine)
         if (sorted.isEmpty()) return "Keine ${pluralLabel(kinds)} vorhanden."
         return sorted.mapIndexed { i, ov ->
+            val rotParts = buildList {
+                if (ov.rotationDegrees != 0f || ov.rotationEndDegrees != null) {
+                    add(if (ov.rotationEndDegrees != null) "rot ${ov.rotationDegrees.roundToInt()}->${ov.rotationEndDegrees.roundToInt()}°" else "rot ${ov.rotationDegrees.roundToInt()}°")
+                }
+                if (ov.rotationYDegrees != 0f || ov.rotationYEndDegrees != null) {
+                    add(if (ov.rotationYEndDegrees != null) "rotY ${ov.rotationYDegrees.roundToInt()}->${ov.rotationYEndDegrees.roundToInt()}°" else "rotY ${ov.rotationYDegrees.roundToInt()}°")
+                }
+                if (ov.rotationXDegrees != 0f || ov.rotationXEndDegrees != null) {
+                    add(if (ov.rotationXEndDegrees != null) "rotX ${ov.rotationXDegrees.roundToInt()}->${ov.rotationXEndDegrees.roundToInt()}°" else "rotX ${ov.rotationXDegrees.roundToInt()}°")
+                }
+            }
+            val rotSuffix = if (rotParts.isEmpty()) "" else ", ${rotParts.joinToString(" ")}"
             "${refName(kinds)}${i + 1}: \"${ov.content}\" (${ProjectEngine.formatSec(ov.startMs)}–${ProjectEngine.formatSec(ov.endMs)}, " +
-                "x${pct(ov.xPercent)}% y${pct(ov.yPercent)}%, Größe ${pct(ov.scale)}%)"
+                "x${pct(ov.xPercent)}% y${pct(ov.yPercent)}%, Größe ${pct(ov.scale)}%$rotSuffix)"
         }.joinToString(" · ")
     }
 
@@ -359,6 +374,12 @@ internal object OverlayCommands {
                             fontId = styled.fontId?.takeIf { isText } ?: ov.fontId,
                             scale = styled.scale ?: ov.scale,
                             yPercent = styled.yPercent ?: ov.yPercent,
+                            rotationDegrees = styled.rotationDegrees ?: ov.rotationDegrees,
+                            rotationEndDegrees = if (styled.rotationDegrees != null) styled.rotationEndDegrees else ov.rotationEndDegrees,
+                            rotationXDegrees = styled.rotationXDegrees ?: ov.rotationXDegrees,
+                            rotationXEndDegrees = if (styled.rotationXDegrees != null) styled.rotationXEndDegrees else ov.rotationXEndDegrees,
+                            rotationYDegrees = styled.rotationYDegrees ?: ov.rotationYDegrees,
+                            rotationYEndDegrees = if (styled.rotationYDegrees != null) styled.rotationYEndDegrees else ov.rotationYEndDegrees,
                         )
                     }
                 },
@@ -414,5 +435,90 @@ internal object OverlayCommands {
         val resized = engine.project.overlays.first { it.id == selection.targets.first().id }
         focus(engine, resized)
         return (if (selection.targets.size == 1) "Größe von ${describe(selection.targets)}: ${pct(resized.scale)} %." else "Größe von ${selection.targets.size} Elementen geändert.") to false
+    }
+
+    // ------------------------------------------------------------------ rotate / spin / flip
+
+    private fun rotate(verb: String, args: List<String>, engine: ProjectEngine): Pair<String, Boolean> {
+        val head = if (args.first().lowercase() in allWords) 2 else 1
+        val after = args.drop(head)
+        val kindMatch = kindWordRegex.matchEntire(args[head - 1])
+        val count = kindMatch?.let { numbered(kindsOf(it.groupValues[1]), engine).size } ?: 0
+        val spacedIndex = kindMatch?.groupValues?.get(2).isNullOrEmpty() &&
+            after.size >= 2 &&
+            intRegex.matches(after[0]) &&
+            (after[0].toIntOrNull() ?: 0) in 1..count
+        val split = if (spacedIndex) head + 1 else head
+
+        val selection = resolve(args.take(split), engine, ROTATE_SYNTAX)
+        selection.error?.let { return it to true }
+
+        val specTokens = args.drop(split)
+        val parsed = PocketScriptParser.parseRotationSpec(verb, specTokens, overlayMode = true)
+            ?: return ROTATE_SYNTAX to true
+
+        val ids = selection.targets.map { it.id }.toSet()
+        engine.commitChange("${describe(selection.targets)} gedreht") { p ->
+            p.copy(
+                overlays = p.overlays.map { ov ->
+                    if (ov.id !in ids) {
+                        ov
+                    } else {
+                        when (parsed.axis) {
+                            PocketScriptParser.RotationAxis.Z -> {
+                                val nextZ = when {
+                                    parsed.isRelative -> ov.rotationDegrees + parsed.startDegrees
+                                    else -> parsed.startDegrees
+                                }
+                                ov.copy(
+                                    rotationDegrees = nextZ,
+                                    rotationEndDegrees = parsed.endDegrees,
+                                )
+                            }
+                            PocketScriptParser.RotationAxis.X -> {
+                                val nextX = when {
+                                    parsed.isToggleFlip -> if (kotlin.math.abs(((ov.rotationXDegrees % 360f) + 360f) % 360f - 180f) < 1f) 0f else 180f
+                                    parsed.isRelative -> ov.rotationXDegrees + parsed.startDegrees
+                                    else -> parsed.startDegrees
+                                }
+                                ov.copy(
+                                    rotationXDegrees = nextX,
+                                    rotationXEndDegrees = parsed.endDegrees,
+                                )
+                            }
+                            PocketScriptParser.RotationAxis.Y -> {
+                                val nextY = when {
+                                    parsed.isToggleFlip -> if (kotlin.math.abs(((ov.rotationYDegrees % 360f) + 360f) % 360f - 180f) < 1f) 0f else 180f
+                                    parsed.isRelative -> ov.rotationYDegrees + parsed.startDegrees
+                                    else -> parsed.startDegrees
+                                }
+                                ov.copy(
+                                    rotationYDegrees = nextY,
+                                    rotationYEndDegrees = parsed.endDegrees,
+                                )
+                            }
+                        }
+                    }
+                },
+            )
+        }
+        val updated = engine.project.overlays.first { it.id == selection.targets.first().id }
+        focus(engine, updated)
+        val axisLabel = when (parsed.axis) {
+            PocketScriptParser.RotationAxis.Z -> "2D-Bild"
+            PocketScriptParser.RotationAxis.X -> "X-Achse"
+            PocketScriptParser.RotationAxis.Y -> "Y-Achse (eigene Achse)"
+        }
+        val angleDesc = if (parsed.endDegrees != null) {
+            "${parsed.startDegrees.roundToInt()}° -> ${parsed.endDegrees.roundToInt()}°"
+        } else {
+            val currentVal = when (parsed.axis) {
+                PocketScriptParser.RotationAxis.Z -> updated.rotationDegrees
+                PocketScriptParser.RotationAxis.X -> updated.rotationXDegrees
+                PocketScriptParser.RotationAxis.Y -> updated.rotationYDegrees
+            }
+            "${currentVal.roundToInt()}°"
+        }
+        return "${describe(selection.targets)} um $axisLabel gedreht ($angleDesc)." to false
     }
 }

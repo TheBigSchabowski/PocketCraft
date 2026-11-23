@@ -26,7 +26,7 @@ object PocketScriptDemo {
 
         # 1 Intro
         0-${'$'}s set text: PocketCraft.gold.huge.top
-        0-${'$'}s set emoji: 🎬.huge
+        0-${'$'}s set emoji: 🎬.huge.spinaxis
         sag(1, Videoschnitt per Befehl, white)
 
         # 2 Untertitel in Farben und Schriften

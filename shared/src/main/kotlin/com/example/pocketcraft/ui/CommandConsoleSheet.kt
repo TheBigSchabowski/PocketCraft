@@ -100,7 +100,7 @@ fun PocketScriptCodePanel(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                // PDF-Anleitung öffnen
+                // PDF-Anleitung öffnen (inkl. 🤖 KI-Prompt Button)
                 Surface(
                     color = Color(0xFF1E293B),
                     shape = RoundedCornerShape(8.dp),
@@ -315,6 +315,24 @@ fun PocketScriptPdfManualDialog(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(
+                        color = Color(0xFF1E293B),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.clickable {
+                            platform.copyToClipboard(PocketScriptPdfManualGenerator.AI_CUTTING_PROMPT)
+                            lastCopiedCommand = "🤖 KI-Prompt (Schnitt-Plan)"
+                            engine.statusBanner = "🤖 KI-Schnitt-Prompt in Zwischenablage kopiert!"
+                        },
+                    ) {
+                        Text(
+                            text = "🤖 KI-Prompt",
+                            color = Color(0xFFA7F3D0),
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                        )
+                    }
+
                     Surface(
                         color = Color(0xFFFFB300),
                         shape = RoundedCornerShape(8.dp),

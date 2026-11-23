@@ -139,7 +139,7 @@ object PocketScriptInterpreter {
     private val commandWords = setOf(
         "all", "alles", "set", "cut", "caption", "sub", "untertitel", "text", "title", "titel", "emoji", "sticker",
         "filter", "fx", "blur", "zoom", "speed", "crop", "trim", "move", "pan", "save", "open", "new", "undo", "redo",
-        "delete", "clear", "export", "font", "rotate", "split", "reset",
+        "delete", "clear", "export", "font", "rotate", "rot", "spin", "turn", "drehen", "flip", "mirror", "split", "reset",
     )
 
     /** Einheitliche Zehntelsekunden-Genauigkeit für alle Skript-Zeitvariablen (wie UI & Timecodes). */
@@ -411,6 +411,7 @@ object PocketScriptInterpreter {
         private val locals = ArrayDeque<MutableMap<String, Any>>()
         private var steps = 0
         private var executedCommands = 0
+        private var hasErrors = false
 
         // --- Variablen
 
@@ -515,7 +516,11 @@ object PocketScriptInterpreter {
             val previous = passthroughLine
             passthroughLine = resolved
             try {
-                messages.add(engine.executeCommand(resolved))
+                val res = engine.executeCommand(resolved)
+                if (engine.commandHistory.lastOrNull()?.isError == true || res.startsWith("⚠")) {
+                    hasErrors = true
+                }
+                messages.add(res)
             } finally {
                 passthroughLine = previous
             }
@@ -774,11 +779,15 @@ object PocketScriptInterpreter {
         }
 
         fun summary(): String {
-            if (messages.isEmpty()) return "Programm ausgeführt."
-            if (messages.size == 1) return messages.first()
+            val prefix = if (hasErrors) "⚠ " else ""
+            if (messages.isEmpty()) return if (hasErrors) "⚠ Fehler im Programm." else "Programm ausgeführt."
+            if (messages.size == 1) {
+                val msg = messages.first()
+                return if (hasErrors && !msg.startsWith("⚠")) "⚠ $msg" else msg
+            }
             val shown = messages.takeLast(4)
-            val prefix = if (messages.size > shown.size) "… " else ""
-            return "$executedCommands Befehle ausgeführt: $prefix" + shown.joinToString(" · ")
+            val ellipsis = if (messages.size > shown.size) "… " else ""
+            return "$prefix$executedCommands Befehle ausgeführt: $ellipsis" + shown.joinToString(" · ")
         }
 
         fun failure(error: ScriptError): String {

@@ -232,4 +232,33 @@ class OverlayCommandsTest {
         assertEquals(1.3f, t.scale, 0.001f)
         assertEquals("Fertig!", t.content)
     }
+
+    @Test
+    fun rotateSpinAndFlipWorkOnOverlaysAndDotModifiers() {
+        val e = engine()
+        e.executeCommand("0-4 set emoji: 🔥.huge.spinaxis")
+        val emoji = e.project.overlays.first { it.kind == OverlayKind.EMOJI }
+        assertEquals(0f, emoji.rotationYAt(0L), 0.01f)
+        assertEquals(180f, emoji.rotationYAt(2_000L), 0.01f)
+        assertEquals(360f, emoji.rotationYAt(4_000L), 0.01f)
+
+        e.executeCommand("rotate text1 15")
+        assertEquals(15f, e.texts()[0].rotationDegrees, 0.01f)
+        e.executeCommand("rotate text1 +10")
+        assertEquals(25f, e.texts()[0].rotationDegrees, 0.01f)
+        e.executeCommand("rotate text1 y 0 -> 360")
+        assertEquals(0f, e.texts()[0].rotationYAt(50_000L), 0.01f)
+        assertEquals(180f, e.texts()[0].rotationYAt(51_500L), 0.01f)
+        assertEquals(360f, e.texts()[0].rotationYAt(53_000L), 0.01f)
+
+        e.executeCommand("spin emoji1 2x")
+        assertEquals(360f, e.project.overlays.first { it.kind == OverlayKind.EMOJI }.rotationZAt(2_000L), 0.01f)
+        e.executeCommand("flip emoji1")
+        assertEquals(180f, e.project.overlays.first { it.kind == OverlayKind.EMOJI }.rotationYDegrees, 0.01f)
+        e.executeCommand("edit text1: Neu.gold.spin.rot15")
+        // `.rot15` setzt static 15° (wird zuletzt/zuerst von rechts geparst, `.spin` setzt 0->360° danach)
+        e.executeCommand("edit text1: .spinaxis")
+        assertEquals(360f, e.texts()[0].rotationYEndDegrees ?: 0f, 0.01f)
+        assertFalse(e.lastWasError())
+    }
 }

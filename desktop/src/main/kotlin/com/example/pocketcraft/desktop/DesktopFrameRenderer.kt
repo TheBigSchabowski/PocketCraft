@@ -82,23 +82,34 @@ class DesktopFrameRenderer(
         }
     }
 
+    private fun axisScale(degrees: Float): Float {
+        val c = kotlin.math.cos(Math.toRadians(degrees.toDouble())).toFloat()
+        return if (kotlin.math.abs(c) < 0.01f) {
+            if (c >= 0f) 0.01f else -0.01f
+        } else {
+            c
+        }
+    }
+
     /** Rendert das Bild für Quellzeit [sourceMs] und gibt die BGRA-Pixel (Zeilenlänge = Breite × 4) zurück. */
     fun render(source: Image, sourceMs: Long): ByteArray {
         val t = project.transformAt(sourceMs)
         canvas.clear(0xFF000000.toInt())
 
-        // Wie die Vorschau: Video und Zuschnitt-Maske liegen gemeinsam im verschobenen/gezoomten Layer
+        // Wie die Vorschau: Video und Zuschnitt-Maske liegen gemeinsam im verschobenen/gezoomten/gedrehten Layer
         canvas.save()
         canvas.translate(t.panX * w, t.panY * h)
         canvas.rotate(t.rotationDegrees, w / 2f, h / 2f)
-        canvas.scale(t.zoom, t.zoom, w / 2f, h / 2f)
+        val sx = t.zoom * axisScale(t.rotationYDegrees)
+        val sy = t.zoom * axisScale(t.rotationXDegrees)
+        canvas.scale(sx, sy, w / 2f, h / 2f)
         drawVideo(source)
         drawCropMask(t)
         canvas.restore()
 
-        drawZoneBlur()
+        drawZoneBlur(sourceMs)
         for (overlay in project.overlays) {
-            if (sourceMs in overlay.startMs..overlay.endMs) drawOverlay(overlay)
+            if (sourceMs in overlay.startMs..overlay.endMs) drawOverlay(overlay, sourceMs)
         }
         project.subtitles.firstOrNull { sourceMs in it.startMs..it.endMs }?.let { drawSubtitle(it) }
 
@@ -155,8 +166,8 @@ class DesktopFrameRenderer(
         }
     }
 
-    private fun drawZoneBlur() {
-        val blur = project.blur
+    private fun drawZoneBlur(sourceMs: Long) {
+        val blur = project.blurAt(sourceMs)
         if (blur.mode == BlurMode.OFF || blur.mode == BlurMode.FULL_FRAME || blur.radiusPx <= 0.5f) return
         val alpha = (blur.radiusPx / 45f).coerceIn(0.15f, 0.85f)
         when (blur.mode) {
@@ -190,7 +201,7 @@ class DesktopFrameRenderer(
         }
     }
 
-    private fun drawOverlay(ov: CanvasOverlay) {
+    private fun drawOverlay(ov: CanvasOverlay, sourceMs: Long) {
         val pad = 4 * dp
         val isText = ov.kind == OverlayKind.TEXT
         val innerX = if (isText) 10 * dp else 0f
@@ -212,8 +223,13 @@ class DesktopFrameRenderer(
             val left = cx - boxW / 2f
             val top = cy - boxH / 2f
             canvas.save()
-            canvas.rotate(ov.rotationDegrees, cx, cy)
-            canvas.scale(ov.scale, ov.scale, cx, cy)
+            canvas.rotate(ov.rotationZAt(sourceMs), cx, cy)
+            canvas.scale(
+                ov.scale * axisScale(ov.rotationYAt(sourceMs)),
+                ov.scale * axisScale(ov.rotationXAt(sourceMs)),
+                cx,
+                cy,
+            )
             if (isText) {
                 Paint().apply { color = ov.backgroundArgb.toInt() }.use { bg ->
                     canvas.drawRRect(RRect.makeLTRB(left + pad, top + pad, left + boxW - pad, top + boxH - pad, 8 * dp), bg)

@@ -207,15 +207,27 @@ object VideoExporter {
             .build()
     }
 
-    /** Zoom, Verschiebung und Drehung wie in der Vorschau (graphicsLayer), in NDC umgerechnet. */
+    /** Skaliert eine 3D-Achsendrehung (X/Y) als cos(Grad) für die affine Export-Matrix (nie 0). */
+    internal fun axisScale(degrees: Float): Float {
+        val c = kotlin.math.cos(Math.toRadians(degrees.toDouble())).toFloat()
+        return if (kotlin.math.abs(c) < 0.01f) {
+            if (c >= 0f) 0.01f else -0.01f
+        } else {
+            c
+        }
+    }
+
+    /** Zoom, Verschiebung und 2D/3D-Drehung wie in der Vorschau (graphicsLayer), in NDC umgerechnet. */
     private fun transformEffect(project: VideoProject, clock: SegmentClock, size: OutputSize): MatrixTransformation {
         val w = size.width.toFloat()
         val h = size.height.toFloat()
         return MatrixTransformation { presentationTimeUs ->
             val t = project.transformAt(clock.sourceMs(presentationTimeUs))
+            val sx = t.zoom * axisScale(t.rotationYDegrees)
+            val sy = t.zoom * axisScale(t.rotationXDegrees)
             Matrix().apply {
                 setScale(w / 2f, h / 2f) // NDC -> Pixel (zentriert, y nach oben)
-                postScale(t.zoom, t.zoom)
+                postScale(sx, sy)
                 postRotate(-t.rotationDegrees) // im Uhrzeigersinn wie in der Vorschau
                 postTranslate(t.panX * w, -t.panY * h)
                 postScale(2f / w, 2f / h) // Pixel -> NDC
@@ -370,11 +382,15 @@ internal class ExportOverlayRenderer(
 
     fun render(sourceMs: Long): Bitmap {
         val t = project.transformAt(sourceMs)
+        val activeBlur = project.blurAt(sourceMs)
         val hasCrop = t.cropLeft > 0.005f || t.cropTop > 0.005f || t.cropRight < 0.995f || t.cropBottom < 0.995f
         val overlays = project.overlays.filter { sourceMs in it.startMs..it.endMs }
         val sub = project.subtitles.firstOrNull { sourceMs in it.startMs..it.endMs }
+        val overlayKey = overlays.joinToString(",") { ov ->
+            "${ov.id}:${(ov.rotationZAt(sourceMs) * 10).roundToInt()}:${(ov.rotationXAt(sourceMs) * 10).roundToInt()}:${(ov.rotationYAt(sourceMs) * 10).roundToInt()}"
+        }
         // Transform-Hash nur in den Cache-Schlüssel aufnehmen, wenn tatsächlich Kanten zugeschnitten sind
-        val key = "${if (hasCrop) t.hashCode() else 0}|${overlays.joinToString(",") { it.id }}|${sub?.id}"
+        val key = "${if (hasCrop) t.hashCode() else 0}|${activeBlur.hashCode()}|$overlayKey|${sub?.id}"
         if (key == lastKey) return buffers[current]
 
         current = 1 - current
@@ -383,23 +399,25 @@ internal class ExportOverlayRenderer(
         val canvas = Canvas(bmp)
 
         drawCropMask(canvas, t)
-        drawZoneBlur(canvas)
-        for (ov in overlays) drawOverlay(canvas, ov)
+        drawZoneBlur(canvas, sourceMs)
+        for (ov in overlays) drawOverlay(canvas, ov, sourceMs)
         if (sub != null) drawSubtitle(canvas, sub)
 
         lastKey = key
         return bmp
     }
 
-    /** Wie die Vorschau: deckend schwarze Maske liegt im transformierten Layer und deckt auch Zoom/Pan ab. */
+    /** Wie die Vorschau: deckend schwarze Maske liegt im transformierten Layer und deckt auch Zoom/Pan/Drehung ab. */
     private fun drawCropMask(canvas: Canvas, t: com.example.pocketcraft.model.CropZoomState) {
         val hasCrop = t.cropLeft > 0.005f || t.cropTop > 0.005f || t.cropRight < 0.995f || t.cropBottom < 0.995f
         if (!hasCrop) return
         val paint = Paint().apply { color = Color.BLACK }
+        val sx = t.zoom * VideoExporter.axisScale(t.rotationYDegrees)
+        val sy = t.zoom * VideoExporter.axisScale(t.rotationXDegrees)
         canvas.save()
         canvas.concat(
             Matrix().apply {
-                setScale(t.zoom, t.zoom, w / 2f, h / 2f)
+                setScale(sx, sy, w / 2f, h / 2f)
                 postRotate(t.rotationDegrees, w / 2f, h / 2f)
                 postTranslate(t.panX * w, t.panY * h)
             },
@@ -417,8 +435,8 @@ internal class ExportOverlayRenderer(
         // Bereiche, die durch die Verschiebung frei werden, bleiben (wie in der Vorschau) schwarz
     }
 
-    private fun drawZoneBlur(canvas: Canvas) {
-        val blur = project.blur
+    private fun drawZoneBlur(canvas: Canvas, sourceMs: Long) {
+        val blur = project.blurAt(sourceMs)
         if (blur.mode == BlurMode.OFF || blur.mode == BlurMode.FULL_FRAME || blur.radiusPx <= 0.5f) return
         val alpha = (blur.radiusPx / 45f).coerceIn(0.15f, 0.85f)
         when (blur.mode) {
@@ -450,7 +468,7 @@ internal class ExportOverlayRenderer(
         }
     }
 
-    private fun drawOverlay(canvas: Canvas, ov: com.example.pocketcraft.model.CanvasOverlay) {
+    private fun drawOverlay(canvas: Canvas, ov: com.example.pocketcraft.model.CanvasOverlay, sourceMs: Long) {
         val isText = ov.kind == OverlayKind.TEXT
         val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
         if (isText) {
@@ -482,8 +500,13 @@ internal class ExportOverlayRenderer(
         val left = cx - boxW / 2f
         val top = cy - boxH / 2f
         canvas.save()
-        canvas.rotate(ov.rotationDegrees, cx, cy)
-        canvas.scale(ov.scale, ov.scale, cx, cy)
+        canvas.rotate(ov.rotationZAt(sourceMs), cx, cy)
+        canvas.scale(
+            ov.scale * VideoExporter.axisScale(ov.rotationYAt(sourceMs)),
+            ov.scale * VideoExporter.axisScale(ov.rotationXAt(sourceMs)),
+            cx,
+            cy,
+        )
         if (isText) {
             val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ov.backgroundArgb.toInt() }
             canvas.drawRoundRect(RectF(left + pad, top + pad, left + boxW - pad, top + boxH - pad), 8 * dp, 8 * dp, bg)

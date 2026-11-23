@@ -355,7 +355,8 @@ private fun TopPillButton(
 private fun InteractiveVideoCanvas(engine: ProjectEngine) {
     val project = engine.project
     val transform = engine.currentTransform(engine.playheadMs)
-    val blurCfg = project.blur
+    val blurCfg = engine.currentBlur(engine.playheadMs)
+    val activeFilter = engine.currentFilter(engine.playheadMs)
 
     // Aktueller Transform-Zustand für Gesten (per rememberUpdatedState, damit Skript-Änderungen nie von altem Zustand überschrieben werden)
     val latestTransformState = rememberUpdatedState(transform)
@@ -422,6 +423,9 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                     translationX = transform.panX * canvasWidthPx
                     translationY = transform.panY * canvasHeightPx
                     rotationZ = transform.rotationDegrees
+                    rotationX = transform.rotationXDegrees
+                    rotationY = transform.rotationYDegrees
+                    cameraDistance = 12f
                 },
         ) {
             val realUri = project.videoUri
@@ -436,7 +440,7 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             } else {
                 ProceduralPreviewBackdrop(
                     playheadMs = engine.playheadMs,
-                    filterConfig = project.filter,
+                    filterConfig = activeFilter,
                 )
             }
 
@@ -676,7 +680,10 @@ private fun CanvasOverlayItem(
                         .graphicsLayer {
                             scaleX = overlay.scale * stageScale
                             scaleY = overlay.scale * stageScale
-                            rotationZ = overlay.rotationDegrees
+                            rotationZ = overlay.rotationZAt(engine.playheadMs)
+                            rotationX = overlay.rotationXAt(engine.playheadMs)
+                            rotationY = overlay.rotationYAt(engine.playheadMs)
+                            cameraDistance = 12f
                         }
                         .clip(RoundedCornerShape(10.dp))
                         .then(
@@ -704,7 +711,7 @@ private fun CanvasOverlayItem(
                                 change.consume()
                                 // Die Bewegung kommt im gedrehten/skalierten Koordinatensystem der Box an
                                 val current = latestOverlay
-                                val angle = Math.toRadians(current.rotationDegrees.toDouble())
+                                val angle = Math.toRadians(current.rotationZAt(engine.playheadMs).toDouble())
                                 val factor = current.scale * latestStageScale
                                 val dx = (dragAmount.x * cos(angle) - dragAmount.y * sin(angle)).toFloat() * factor
                                 val dy = (dragAmount.x * sin(angle) + dragAmount.y * cos(angle)).toFloat() * factor

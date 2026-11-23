@@ -506,4 +506,179 @@ class PocketScriptLanguageTest {
         assertEquals(0.10f, e.currentTransform(51_000L).panY, 0.001f)
         assertEquals(33_300L, e.project.trimStartMs)
     }
+
+    @Test
+    fun axisRotation2dAnd3dWorkStaticAnimatedAndInConditions() {
+        val e = engine()
+
+        // Statische 2D-Rotation & Reset
+        e.executeCommand("rotate 90")
+        assertEquals(90f, e.project.transform.rotationDegrees, 0.01f)
+        e.executeCommand("rotate 0")
+        assertEquals(0f, e.project.transform.rotationDegrees, 0.01f)
+
+        // 3D-Drehung um eigene Y-Achse (0 -> 360°)
+        e.executeCommand("0-4 rotate y 0 -> 360")
+        assertEquals(0f, e.currentTransform(0L).rotationYDegrees, 0.01f)
+        assertEquals(180f, e.currentTransform(2_000L).rotationYDegrees, 0.01f)
+        assertEquals(360f, e.currentTransform(4_000L).rotationYDegrees, 0.01f)
+        assertEquals(0f, e.currentTransform(6_000L).rotationYDegrees, 0.01f)
+
+        // Kurzform `spin axis` / `spin 0-4 x 2x` / `flip`
+        val spin = engine()
+        spin.executeCommand("spin 0-4 axis")
+        assertEquals(180f, spin.currentTransform(2_000L).rotationYDegrees, 0.01f)
+        spin.executeCommand("0-4 spin x 2x")
+        assertEquals(360f, spin.currentTransform(2_000L).rotationXDegrees, 0.01f)
+        spin.executeCommand("6-8 flip")
+        assertEquals(180f, spin.currentTransform(7_000L).rotationYDegrees, 0.01f)
+        assertEquals(0f, spin.currentTransform(5_000L).rotationYDegrees, 0.01f)
+        spin.executeCommand("flip")
+        assertEquals(180f, spin.project.transform.rotationYDegrees, 0.01f)
+        spin.executeCommand("flip")
+        assertEquals(0f, spin.project.transform.rotationYDegrees, 0.01f)
+
+        // Kombiniert + Bedingung `if caption red: rotate y 0 -> 360`
+        val combo = engine()
+        combo.executeCommand("0-4 crop 20% zoom 0 -> 1 rotate y 0 -> 360")
+        val mid = combo.currentTransform(2_000L)
+        assertEquals(0.20f, mid.cropLeft, 0.01f)
+        assertEquals(0.80f, mid.cropBottom, 0.01f)
+        assertEquals(0.55f, mid.zoom, 0.02f)
+        assertEquals(180f, mid.rotationYDegrees, 0.01f)
+
+        combo.executeCommand("6-10 caption: Highlight.red")
+        combo.executeCommand("if caption red: spin axis")
+        assertEquals(180f, combo.currentTransform(8_000L).rotationYDegrees, 0.01f)
+        assertEquals(0f, combo.currentTransform(5_000L).rotationYDegrees, 0.01f)
+    }
+
+    @Test
+    fun pocketScript2UnifiedSyntaxStrictValidationAndRepairedPhoneScript() {
+        val e = engine()
+        e.setVideoSource("content://test/guitar.mp4", 178_065L, "Jam")
+
+        // Repariertes Gitarren-Jam-Skript (auch mit Verb-zuerst `caption 6,9 - 8,9 set text: ...`)
+        val script = """
+            clear all
+            0-5,9 zoom 0 -> 1
+            caption 6,9 - 8,9 set text: Kleiner Jam mit meinem Gitarrenlehrer zu Reverse Psychology.red.mono.top
+            if caption red: crop 20%
+        """.trimIndent()
+        val res = e.executeCommand(script)
+        assertFalse(e.commandHistory.last().isError, res)
+
+        assertEquals(0.1f, e.currentTransform(0L).zoom, 0.01f)
+        assertEquals(0.55f, e.currentTransform(2_950L).zoom, 0.02f)
+        assertEquals(1.0f, e.currentTransform(5_900L).zoom, 0.01f)
+
+        val sub = e.project.subtitles.single()
+        assertEquals("Kleiner Jam mit meinem Gitarrenlehrer zu Reverse Psychology", sub.text)
+        assertEquals(6_900L, sub.startMs)
+        assertEquals(8_900L, sub.endMs)
+        assertEquals(0xFFFF3B30L, sub.textColorArgb)
+        assertEquals("mono_tech", sub.fontId)
+        assertEquals(0.16f, sub.verticalPosition, 0.01f)
+
+        // Crop 20% gilt exakt solange der rote Untertitel läuft
+        assertEquals(0.20f, e.currentTransform(7_500L).cropLeft, 0.01f)
+        assertEquals(0.80f, e.currentTransform(7_500L).cropBottom, 0.01f)
+        assertEquals(0.0f, e.currentTransform(2_000L).cropLeft, 0.01f)
+
+        // Verb-zuerst-Syntax für zoom, crop, move, filter, blur
+        val v = engine()
+        v.executeCommand("zoom 0-5,9 0 -> 1")
+        assertEquals(0.1f, v.currentTransform(0L).zoom, 0.01f)
+        assertEquals(1.0f, v.currentTransform(5_900L).zoom, 0.01f)
+        v.executeCommand("crop 1-3 top 25% left 10%")
+        assertEquals(0.25f, v.currentTransform(2_000L).cropTop, 0.01f)
+        assertEquals(0.10f, v.currentTransform(2_000L).cropLeft, 0.01f)
+        v.executeCommand("move 4-6 up 10% right 5%")
+        assertEquals(-0.10f, v.currentTransform(5_000L).panY, 0.01f)
+        assertEquals(0.05f, v.currentTransform(5_000L).panX, 0.01f)
+        v.executeCommand("filter 2-4 bw")
+        assertEquals(VideoFilterPreset.BW_NOIR, v.currentFilter(3_000L).preset)
+        assertEquals(VideoFilterPreset.NONE, v.currentFilter(1_000L).preset)
+        v.executeCommand("2-4 blur privacy 24")
+        assertEquals(com.example.pocketcraft.model.BlurMode.PRIVACY_ZONE, v.currentBlur(3_000L).mode)
+        assertEquals(24f, v.currentBlur(3_000L).radiusPx, 0.01f)
+
+        // Strenge Fehlerprüfungen statt stillem Verschlucken
+        val strict = engine()
+        assertTrue(strict.executeCommand("0-1 zoom in 5,9").startsWith("⚠"))
+        assertTrue(strict.commandHistory.last().isError)
+        assertTrue(strict.executeCommand("caption 6,9-8,9").startsWith("⚠"))
+        assertTrue(strict.commandHistory.last().isError)
+        assertTrue(strict.executeCommand("8-3 set caption: Rückwärts").startsWith("⚠"))
+        assertTrue(strict.commandHistory.last().isError)
+        assertTrue(strict.executeCommand("0-3 set unbekannt: Hallo").startsWith("⚠"))
+        assertTrue(strict.commandHistory.last().isError)
+
+        // `if caption red:` sucht bei Farbnamen nach echter Farbe, nicht nach Text "red"
+        strict.executeCommand("0-3 caption: red pill blue pill.white")
+        val noColorMatch = strict.executeCommand("if caption red: crop 20%")
+        assertTrue(noColorMatch.startsWith("⚠"), noColorMatch)
+        assertEquals(0.0f, strict.currentTransform(1_500L).cropLeft, 0.01f)
+    }
+
+    @Test
+    fun zoomTargetPointAnimatesPanTowardsCoordinatesAndNamedAnchors() {
+        // Prozent-Zielpunkt rechts-oben (75% von links, 25% von oben):
+        // Kamera fährt synchron zum Zoom nach links (panX < 0) und unten (panY > 0), um (75%, 25%) im Fokus zu halten.
+        val e1 = engine()
+        val r1 = e1.executeCommand("0-4 zoom in at 75% 25%")
+        assertFalse(e1.commandHistory.last().isError, r1)
+        assertEquals(1.0f, e1.currentTransform(0L).zoom, 0.01f)
+        assertEquals(0.0f, e1.currentTransform(0L).panX, 0.01f)
+        assertEquals(0.0f, e1.currentTransform(0L).panY, 0.01f)
+        assertEquals(1.4f, e1.currentTransform(2_000L).zoom, 0.01f)
+        assertTrue(e1.currentTransform(2_000L).panX < -0.05f)
+        assertTrue(e1.currentTransform(2_000L).panY > 0.05f)
+        assertEquals(1.8f, e1.currentTransform(4_000L).zoom, 0.01f)
+        assertEquals(-0.20f, e1.currentTransform(4_000L).panX, 0.01f)
+        assertEquals(0.20f, e1.currentTransform(4_000L).panY, 0.01f)
+
+        // Benannter Anker `top-right` mit `1 -> 2` und Kombi mit Rotation
+        val e2 = engine()
+        val r2 = e2.executeCommand("0-4 zoom 1 -> 2 at top-right rotate y 0 -> 360")
+        assertFalse(e2.commandHistory.last().isError, r2)
+        val end2 = e2.currentTransform(4_000L)
+        assertEquals(2.0f, end2.zoom, 0.01f)
+        assertEquals(-0.30f, end2.panX, 0.01f)
+        assertEquals(0.30f, end2.panY, 0.01f)
+        assertEquals(360f, end2.rotationYDegrees, 0.01f)
+
+        // Verb-zuerst + deutscher Anker `auf links` + `to 70 35`
+        val e3 = engine()
+        assertFalse(e3.executeCommand("zoom 0-4 in auf links").startsWith("⚠"))
+        assertEquals(1.8f, e3.currentTransform(4_000L).zoom, 0.01f)
+        assertTrue(e3.currentTransform(4_000L).panX > 0.2f)
+        assertEquals(0.0f, e3.currentTransform(4_000L).panY, 0.01f)
+
+        val e4 = engine()
+        assertFalse(e4.executeCommand("0-4 zoom 1 -> 2 to 70 35").startsWith("⚠"))
+        assertEquals(2.0f, e4.currentTransform(4_000L).zoom, 0.01f)
+        assertEquals(-0.20f, e4.currentTransform(4_000L).panX, 0.01f)
+        assertEquals(0.15f, e4.currentTransform(4_000L).panY, 0.01f)
+
+        // Bedingter Zielpunkt-Zoom & Abschieds-Zoom am Videoende
+        val e5 = engine()
+        e5.setVideoSource("content://test/guitar.mp4", 178_065L, "Jam")
+        val scriptRes = e5.executeCommand(
+            """
+            0-5,9 zoom 0 -> 1
+            6,9-8,9 caption: Intro.red
+            173-178,1 zoom in at 65% 40%
+            """.trimIndent(),
+        )
+        assertFalse(e5.commandHistory.last().isError, scriptRes)
+        assertEquals(1.0f, e5.currentTransform(173_000L).zoom, 0.01f)
+        assertEquals(1.8f, e5.currentTransform(178_065L).zoom, 0.02f)
+        assertTrue(e5.currentTransform(178_065L).panX < -0.1f)
+
+        // Ungültiger Zoom-Zielpunkt liefert klaren Fehler statt still zu schlucken
+        val bad = engine()
+        assertTrue(bad.executeCommand("0-4 zoom in at banane").startsWith("⚠"))
+        assertTrue(bad.executeCommand("0-4 zoom in at 150% 50%").startsWith("⚠"))
+    }
 }

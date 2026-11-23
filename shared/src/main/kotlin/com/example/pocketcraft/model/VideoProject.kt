@@ -58,9 +58,9 @@ data class VideoProject(
         }
 
     /**
-     * Zum Zeitpunkt [atMs] gültiger Zoom/Pan/Zuschnitt: globaler [transform] kombiniert mit
-     * zeitgebundenen Kanten-Zuschnitten (`u20%`, `o20%`, …) aus [timedFormatSpans].
-     * Wird von Vorschau UND Video-Export genutzt.
+     * Zum Zeitpunkt [atMs] gültiger Zoom/Pan/Zuschnitt/Drehung: globaler [transform] kombiniert mit
+     * zeitgebundenen Kanten-Zuschnitten (`u20%`, `o20%`, `crop 20%`), Zoom- und Rotations-Animationen
+     * aus [timedFormatSpans]. Wird von Vorschau UND Video-Export genutzt.
      */
     fun transformAt(atMs: Long): CropZoomState {
         var current = transform
@@ -82,27 +82,78 @@ data class VideoProject(
             if (span.cropLeft != null && right <= left + 0.02f) {
                 right = 1.0f
             }
-            // Bei Zoom-Animationen (zoom -> zoomEnd) linear zwischen Start- und Endzeitpunkt interpolieren
-            val spanZoom = when {
-                span.zoom != null && span.zoomEnd != null -> {
-                    val duration = (span.endMs - span.startMs).coerceAtLeast(1L)
-                    val fraction = ((atMs - span.startMs).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
-                    (span.zoom + (span.zoomEnd - span.zoom) * fraction).coerceIn(0.1f, 5.0f)
-                }
-                span.zoom != null -> span.zoom.coerceIn(0.1f, 5.0f)
-                else -> current.zoom
-            }
+            // Bei Animationen (start -> end) linear zwischen Start- und Endzeitpunkt interpolieren
+            val spanZoom = interpolateSpanValue(
+                span.zoom, span.zoomEnd, current.zoom, span.startMs, span.endMs, atMs,
+            ).coerceIn(0.1f, 5.0f)
+            val spanPanX = interpolateSpanValue(
+                span.panX, span.panXEnd, current.panX, span.startMs, span.endMs, atMs,
+            ).coerceIn(-1f, 1f)
+            val spanPanY = interpolateSpanValue(
+                span.panY, span.panYEnd, current.panY, span.startMs, span.endMs, atMs,
+            ).coerceIn(-1f, 1f)
+            val spanRotZ = interpolateSpanValue(
+                span.rotationDegrees, span.rotationEndDegrees, current.rotationDegrees, span.startMs, span.endMs, atMs,
+            )
+            val spanRotX = interpolateSpanValue(
+                span.rotationXDegrees, span.rotationXEndDegrees, current.rotationXDegrees, span.startMs, span.endMs, atMs,
+            )
+            val spanRotY = interpolateSpanValue(
+                span.rotationYDegrees, span.rotationYEndDegrees, current.rotationYDegrees, span.startMs, span.endMs, atMs,
+            )
             current = current.copy(
                 cropLeft = left.coerceIn(0f, 0.98f),
                 cropTop = top.coerceIn(0f, 0.98f),
                 cropRight = right.coerceIn((left + 0.02f).coerceAtMost(1f), 1f),
                 cropBottom = bottom.coerceIn((top + 0.02f).coerceAtMost(1f), 1f),
-                panX = (span.panX ?: current.panX).coerceIn(-1f, 1f),
-                panY = (span.panY ?: current.panY).coerceIn(-1f, 1f),
+                panX = spanPanX,
+                panY = spanPanY,
                 zoom = spanZoom,
+                rotationDegrees = spanRotZ,
+                rotationXDegrees = spanRotX,
+                rotationYDegrees = spanRotY,
             )
         }
         return current
+    }
+
+    /** Lineare Interpolation eines optional animierten Span-Werts im Zeitfenster [spanStart]..[spanEnd]. */
+    private fun interpolateSpanValue(
+        start: Float?,
+        end: Float?,
+        fallback: Float,
+        spanStart: Long,
+        spanEnd: Long,
+        atMs: Long,
+    ): Float = when {
+        start != null && end != null -> {
+            val duration = (spanEnd - spanStart).coerceAtLeast(1L)
+            val fraction = ((atMs - spanStart).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+            start + (end - start) * fraction
+        }
+        start != null -> start
+        else -> fallback
+    }
+
+    /** Zum Zeitpunkt [atMs] aktiver Farbfilter (globaler [filter] oder zeitgebundener Span-Filter). */
+    fun filterAt(atMs: Long): FilterConfig {
+        val span = timedFormatSpans.lastOrNull { atMs in it.startMs..it.endMs && it.filterPreset != null }
+        return if (span?.filterPreset != null) filter.copy(preset = span.filterPreset) else filter
+    }
+
+    /** Zum Zeitpunkt [atMs] aktive Unschärfe (globaler [blur] oder zeitgebundener Span-Blur). */
+    fun blurAt(atMs: Long): BlurConfig {
+        val span = timedFormatSpans.lastOrNull {
+            atMs in it.startMs..it.endMs && (it.blurRadiusPx != null || it.blurMode != null)
+        } ?: return blur
+        val radius = (span.blurRadiusPx ?: blur.radiusPx).coerceIn(0f, 45f)
+        val mode = when {
+            radius <= 0f -> BlurMode.OFF
+            span.blurMode != null -> span.blurMode
+            blur.mode == BlurMode.OFF -> BlurMode.BACKGROUND_BOKEH
+            else -> blur.mode
+        }
+        return blur.copy(mode = mode, radiusPx = radius)
     }
 
     /**
@@ -182,17 +233,48 @@ data class TimedFormatSpan(
     val cropBottom: Float? = null,
     val panX: Float? = null,
     val panY: Float? = null,
+    /** Optionales Ziel für animierte Kamerafahrt / Zoom-Zielpunkt (`panX` -> `panXEnd`, `panY` -> `panYEnd`). */
+    val panXEnd: Float? = null,
+    val panYEnd: Float? = null,
     val zoom: Float? = null,
     /** Optionales Ziel für animiertes Rein-/Rauszoomen (`zoom` -> `zoomEnd` über `startMs..endMs`). */
     val zoomEnd: Float? = null,
+    /** 2D-Drehung in der Bildebene (Z-Achse, optional animiert bis [rotationEndDegrees]). */
+    val rotationDegrees: Float? = null,
+    val rotationEndDegrees: Float? = null,
+    /** 3D-Drehung um die eigene waagerechte Achse (X-Achse, optional animiert bis [rotationXEndDegrees]). */
+    val rotationXDegrees: Float? = null,
+    val rotationXEndDegrees: Float? = null,
+    /** 3D-Drehung um die eigene senkrechte Achse (Y-Achse, optional animiert bis [rotationYEndDegrees]). */
+    val rotationYDegrees: Float? = null,
+    val rotationYEndDegrees: Float? = null,
     val filterPreset: VideoFilterPreset? = null,
     val blurRadiusPx: Float? = null,
+    val blurMode: BlurMode? = null,
 ) {
     val aspectFloat: Float
         get() = (ratioWidth / ratioHeight.coerceAtLeast(0.1f)).coerceIn(0.25f, 4.0f)
 
     val label: String
         get() = "${ratioWidth.toInt()}:${ratioHeight.toInt()}"
+
+    /** `true`, falls der Span mindestens einen Effekt trägt (sonst kann er beim Zurücksetzen entfernt werden). */
+    fun hasAnyEffect(): Boolean = hasCustomRatio ||
+        cropLeft != null ||
+        cropTop != null ||
+        cropRight != null ||
+        cropBottom != null ||
+        panX != null ||
+        panY != null ||
+        panXEnd != null ||
+        panYEnd != null ||
+        zoom != null ||
+        rotationDegrees != null ||
+        rotationXDegrees != null ||
+        rotationYDegrees != null ||
+        filterPreset != null ||
+        blurRadiusPx != null ||
+        blurMode != null
 }
 
 /**
@@ -222,12 +304,14 @@ data class CropZoomState(
     val panX: Float = 0.0f,
     val panY: Float = 0.0f,
     val rotationDegrees: Float = 0.0f,
+    val rotationXDegrees: Float = 0.0f,
+    val rotationYDegrees: Float = 0.0f,
     val cropLeft: Float = 0.0f,
     val cropTop: Float = 0.0f,
     val cropRight: Float = 1.0f,
     val cropBottom: Float = 1.0f,
 ) {
-    /** Kompakte Zusammenfassung aktiver Kanten-Cuts & Verschiebungen wie `u20% move 10%l` (oder leer, falls 0%). */
+    /** Kompakte Zusammenfassung aktiver Kanten-Cuts, Verschiebungen & Drehungen (oder leer, falls neutral). */
     fun activeEdgeCropSummary(): String {
         val parts = mutableListOf<String>()
         val uPct = ((1f - cropBottom) * 100f).roundToInt()
@@ -244,6 +328,12 @@ data class CropZoomState(
         if (moveYPct < 0) parts.add("move ${-moveYPct}%u")
         if (moveXPct > 0) parts.add("move ${moveXPct}%r")
         if (moveXPct < 0) parts.add("move ${-moveXPct}%left")
+        val rotZ = rotationDegrees.roundToInt()
+        val rotY = rotationYDegrees.roundToInt()
+        val rotX = rotationXDegrees.roundToInt()
+        if (rotZ % 360 != 0) parts.add("rot ${rotZ}°")
+        if (rotY % 360 != 0) parts.add("rotY ${rotY}°")
+        if (rotX % 360 != 0) parts.add("rotX ${rotX}°")
         return parts.joinToString(" ")
     }
 }
@@ -358,12 +448,33 @@ data class CanvasOverlay(
     val yPercent: Float = 0.35f,
     val scale: Float = 1.0f,
     val rotationDegrees: Float = 0f,
+    val rotationEndDegrees: Float? = null,
+    val rotationXDegrees: Float = 0f,
+    val rotationXEndDegrees: Float? = null,
+    val rotationYDegrees: Float = 0f,
+    val rotationYEndDegrees: Float? = null,
     val fontId: String = BuiltInFont.SANS_BOLD.id,
     val colorArgb: Long = 0xFF00E5FF,
     val backgroundArgb: Long = 0x99000000,
     val startMs: Long = 0L,
     val endMs: Long = 15_000L,
-)
+) {
+    private fun interpolateRotation(start: Float, end: Float?, atMs: Long): Float {
+        if (end == null) return start
+        val duration = (endMs - startMs).coerceAtLeast(1L)
+        val fraction = ((atMs - startMs).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+        return start + (end - start) * fraction
+    }
+
+    /** 2D-Rotation in der Bildebene (Z-Achse) zum Zeitpunkt [atMs]. */
+    fun rotationZAt(atMs: Long): Float = interpolateRotation(rotationDegrees, rotationEndDegrees, atMs)
+
+    /** 3D-Rotation um die eigene waagerechte Achse (X-Achse) zum Zeitpunkt [atMs]. */
+    fun rotationXAt(atMs: Long): Float = interpolateRotation(rotationXDegrees, rotationXEndDegrees, atMs)
+
+    /** 3D-Rotation um die eigene senkrechte Achse (Y-Achse) zum Zeitpunkt [atMs]. */
+    fun rotationYAt(atMs: Long): Float = interpolateRotation(rotationYDegrees, rotationYEndDegrees, atMs)
+}
 
 /**
  * Mitgelieferte System- und Design-Schriftarten, die sofort ohne Nachladen bereitstehen.

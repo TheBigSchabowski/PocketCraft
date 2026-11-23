@@ -304,6 +304,16 @@ private fun CropAndZoomToolView(engine: ProjectEngine) {
                 onClick = { engine.setRotation(t.rotationDegrees + 90f) },
             )
             SmallActionChip(
+                label = "🪐 3D-Spin Achse",
+                active = false,
+                onClick = { engine.executeCommand("0-4 rotate y 0 -> 360") },
+            )
+            SmallActionChip(
+                label = "🪞 Spiegeln",
+                active = kotlin.math.abs((t.rotationYDegrees % 360f) - 180f) < 1f,
+                onClick = { engine.executeCommand("flip") },
+            )
+            SmallActionChip(
                 label = "🔍+ Reinzoomen",
                 active = false,
                 onClick = { engine.executeCommand("zoom in") },

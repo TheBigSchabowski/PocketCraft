@@ -57,6 +57,9 @@ fun PocketCraftApp(
         kotlinx.coroutines.delay(4_000L)
         engine.autosave()
     }
+    LaunchedEffect(platform) {
+        engine.onCopyToClipboard = { platform.copyToClipboard(it) }
+    }
 
     CompositionLocalProvider(LocalPlatformHooks provides platform) {
     MaterialTheme(colorScheme = PocketCraftDarkPalette) {

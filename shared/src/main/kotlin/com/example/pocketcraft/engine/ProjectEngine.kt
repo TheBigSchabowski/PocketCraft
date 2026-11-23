@@ -143,6 +143,9 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     /** Callback für den Export (von der MainActivity gesetzt, damit auch der Befehl `export` funktioniert). */
     var onExportRequested: (() -> Unit)? = null
 
+    /** Optionales Clipboard-Callback für den Konsolenbefehl `ki` / `prompt`. */
+    var onCopyToClipboard: ((String) -> Unit)? = null
+
     /** Fortschritt eines laufenden Video-Exports (0–100) oder `null`, wenn gerade nicht exportiert wird. */
     var exportProgress by mutableStateOf<Int?>(null)
 
@@ -288,11 +291,12 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
 
     /** Speichert das aktuelle Projekt (legt beim ersten Mal ein neues Projekt an). */
     fun saveCurrentProject(newTitle: String? = null): String {
-        val store = projectStore ?: return "Speichern nicht möglich (kein Projektspeicher verfügbar)."
         val cleanTitle = newTitle?.trim()?.takeIf { it.isNotEmpty() }
         if (cleanTitle != null && cleanTitle != project.title) {
             commitChange("Projekt umbenannt in '$cleanTitle'") { it.copy(title = cleanTitle) }
         }
+        val store = projectStore
+            ?: return "Projekt '${project.title}' bereit (im Arbeitsspeicher)."
         val id = currentProjectId ?: newProjectId()
         return try {
             store.save(id, project)
@@ -445,21 +449,16 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         commitChange("Zoom ${(clampedZoom * 10).roundToInt() / 10f}x", coalesceKey = if (clearTimedZoom) null else "zoom") { p ->
             val updatedSpans = if (clearTimedZoom) {
                 p.timedFormatSpans.mapNotNull { span ->
-                    val stripped = span.copy(zoom = null, zoomEnd = null)
-                    if (!stripped.hasCustomRatio &&
-                        stripped.cropLeft == null &&
-                        stripped.cropTop == null &&
-                        stripped.cropRight == null &&
-                        stripped.cropBottom == null &&
-                        stripped.panX == null &&
-                        stripped.panY == null &&
-                        stripped.filterPreset == null &&
-                        stripped.blurRadiusPx == null
-                    ) {
-                        null
-                    } else {
-                        stripped
-                    }
+                    val hasAnimatedZoomPan = span.panXEnd != null || span.panYEnd != null
+                    val stripped = span.copy(
+                        zoom = null,
+                        zoomEnd = null,
+                        panX = if (hasAnimatedZoomPan) null else span.panX,
+                        panXEnd = null,
+                        panY = if (hasAnimatedZoomPan) null else span.panY,
+                        panYEnd = null,
+                    )
+                    if (!stripped.hasAnyEffect()) null else stripped
                 }
             } else {
                 p.timedFormatSpans
@@ -475,7 +474,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         }
     }
 
-    /** Setzt Zoom, Pan, Rotation, Kanten-Zuschnitt sowie zeitgebundene Zoom-/Crop-/Pan-Spans zurück. */
+    /** Setzt Zoom, Pan, Rotation (2D & 3D), Kanten-Zuschnitt sowie zeitgebundene Spans zurück. */
     fun resetZoomAndCrop() {
         commitChange("Zoom & Zuschnitt zurückgesetzt") { p ->
             val cleanedSpans = p.timedFormatSpans.mapNotNull { span ->
@@ -486,14 +485,18 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                     cropBottom = null,
                     panX = null,
                     panY = null,
+                    panXEnd = null,
+                    panYEnd = null,
                     zoom = null,
                     zoomEnd = null,
+                    rotationDegrees = null,
+                    rotationEndDegrees = null,
+                    rotationXDegrees = null,
+                    rotationXEndDegrees = null,
+                    rotationYDegrees = null,
+                    rotationYEndDegrees = null,
                 )
-                if (!stripped.hasCustomRatio && stripped.filterPreset == null && stripped.blurRadiusPx == null) {
-                    null
-                } else {
-                    stripped
-                }
+                if (!stripped.hasAnyEffect()) null else stripped
             }
             p.copy(
                 transform = CropZoomState(),
@@ -523,6 +526,48 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val norm = ((degrees % 360f) + 360f) % 360f
         commitChange("Rotation ${norm.roundToInt()}°") { p ->
             p.copy(transform = p.transform.copy(rotationDegrees = norm))
+        }
+    }
+
+    /** Setzt globale 2D- (Z) und 3D-Achsen-Drehung (X waagerecht, Y senkrecht um eigene Achse). */
+    fun setAxisRotation(
+        rotationZ: Float = project.transform.rotationDegrees,
+        rotationX: Float = project.transform.rotationXDegrees,
+        rotationY: Float = project.transform.rotationYDegrees,
+        clearTimedRotation: Boolean = false,
+    ) {
+        val normZ = ((rotationZ % 360f) + 360f) % 360f
+        val normX = ((rotationX % 360f) + 360f) % 360f
+        val normY = ((rotationY % 360f) + 360f) % 360f
+        val label = buildList {
+            if (normZ != 0f || (normX == 0f && normY == 0f)) add("Z ${normZ.roundToInt()}°")
+            if (normY != 0f) add("Y ${normY.roundToInt()}°")
+            if (normX != 0f) add("X ${normX.roundToInt()}°")
+        }.joinToString(" · ")
+        commitChange("Drehung $label") { p ->
+            val updatedSpans = if (clearTimedRotation) {
+                p.timedFormatSpans.mapNotNull { span ->
+                    val stripped = span.copy(
+                        rotationDegrees = null,
+                        rotationEndDegrees = null,
+                        rotationXDegrees = null,
+                        rotationXEndDegrees = null,
+                        rotationYDegrees = null,
+                        rotationYEndDegrees = null,
+                    )
+                    if (!stripped.hasAnyEffect()) null else stripped
+                }
+            } else {
+                p.timedFormatSpans
+            }
+            p.copy(
+                transform = p.transform.copy(
+                    rotationDegrees = normZ,
+                    rotationXDegrees = normX,
+                    rotationYDegrees = normY,
+                ),
+                timedFormatSpans = updatedSpans,
+            )
         }
     }
 
@@ -937,6 +982,17 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 resultMessage = "PocketScript PDF-Anleitung geöffnet."
             }
 
+            "ki", "prompt", "kiprompt" -> {
+                val copy = onCopyToClipboard
+                if (copy != null) {
+                    copy(PocketScriptPdfManualGenerator.AI_CUTTING_PROMPT)
+                    resultMessage = "🤖 KI-Schnitt-Prompt in Zwischenablage kopiert!"
+                } else {
+                    isPdfManualOpen = true
+                    resultMessage = PocketScriptPdfManualGenerator.AI_CUTTING_PROMPT
+                }
+            }
+
             "save", "speichern", "sichern", "s" -> {
                 if (args.firstOrNull()?.lowercase() in listOf("as", "als", "unter")) {
                     resultMessage = saveProjectAs(args.drop(1).joinToString(" "))
@@ -1272,7 +1328,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 }
             }
             "help", "?" -> {
-                resultMessage = "Vorführung: demo · Programmieren: let x = 5 (Projekt), global x = 5 / global def … (alle Projekte), zoom \$x, {Rechnung}, for i in 1..5: …, repeat 3: …, if \$x > 2: … (else/end), def name(a): …, vars · Projekt: save [Name], save as <Name>, projects, open <Name|Nr>, new [Name], rename <Name>, export · Schnitt: delete 10-20, delete between cut1 cut2 · Löschen: clear all captions, clear caption1, clear texts, clear emoji1, clear cuts, clear all, captions (Liste) · Verlauf: show edits (alle Befehle dieses Projekts), clear edits · Text/Emoji ändern: texts (Liste), move text1 10%u | 10%l | 10%r | 10%left | 50 20 | top, edit text1: Neuer Text, size text1 150 · Befehle: undo, redo, zoom <0.1..5|in|out|1->2>, pan <x> <y>, crop <9:16|1:1|4:5|16:9|Prozent>, trim <start> <ende>, split, speed <x>, filter <name>, blur <off|bokeh|privacy|full> [radius], text <Inhalt>, emoji <🔥>, caption <Text>, autocaption, font <name>, rotate <Grad>, reset"
+                resultMessage = "PocketScript 2.0: demo · Zeitbereich vor oder nach Befehl: 6,9-8,9 caption: Text.red.mono.top == caption 6,9-8,9: Text.red.mono.top · 3D-Achse & Drehung: rotate y 0 -> 360, spin axis, rotate x 0 -> 360, flip, rotate text1 15, spin emoji1 axis · Crop & Move: crop top/bottom/left/right 20%, move up/down/left/right 10% · Zoom: 0-5,9 zoom 0 -> 1, zoom in, zoom 1,8 · Programmieren: let x = 5, global x = 5, for t in 0..12 step 4: …, if caption red: …, def name(a): …, vars · Projekt: save [Name], open <Name>, new [Name], export, show edits, undo, redo, reset"
             }
 
             else -> {
@@ -1399,9 +1455,15 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     /**
      * Berechnet den zum aktuellen [playheadMs] gültigen [CropZoomState]:
      * Kombiniert den globalen `project.transform` mit etwaigen zeitgebundenen Kanten-Zuschnitten
-     * (`u20%`, `o20%`, `r20%`, `l20%`, `90 u90%`) aus `timedFormatSpans`.
+     * (`u20%`, `crop bottom 20%`), Zooms und 2D/3D-Drehungen aus `timedFormatSpans`.
      */
     fun currentTransform(atMs: Long = playheadMs): CropZoomState = project.transformAt(atMs)
+
+    /** Berechnet den zum Zeitpunkt [atMs] aktiven Farbfilter (global oder zeitgebunden). */
+    fun currentFilter(atMs: Long = playheadMs): FilterConfig = project.filterAt(atMs)
+
+    /** Berechnet die zum Zeitpunkt [atMs] aktive Unschärfe (global oder zeitgebunden). */
+    fun currentBlur(atMs: Long = playheadMs): BlurConfig = project.blurAt(atMs)
 
     fun currentFormatLabel(atMs: Long = playheadMs): String {
         val activeSpan = project.timedFormatSpans.lastOrNull { atMs in it.startMs..it.endMs && it.hasCustomRatio }
