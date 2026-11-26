@@ -18,6 +18,8 @@ import com.example.pocketcraft.model.RemovedRange
 import com.example.pocketcraft.model.SubtitleSegment
 import com.example.pocketcraft.model.VideoFilterPreset
 import com.example.pocketcraft.model.VideoProject
+import com.example.pocketcraft.model.defaultDemoOverlays
+import com.example.pocketcraft.model.defaultDemoSubtitles
 import kotlin.math.roundToInt
 
 /**
@@ -81,6 +83,12 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
     /** Variablen und Funktionen aus PocketScript (`let x = 3`, `def …`) – gelten bis zum App-Ende. */
     val scriptEnv = ScriptEnvironment()
 
+    /** End time (ms) of the last created timed element, used by sequential `+3` time ranges. */
+    var lastTimelineEndMs: Long = 0L
+
+    /** Structured output lines from the latest PocketScript execution (shown in the Code Editor strip). */
+    var lastScriptOutput by mutableStateOf<List<ScriptOutputLine>>(emptyList())
+
     /** Aktuell ausgewähltes Overlay auf dem Canvas (zum Verschieben/Bearbeiten). */
     var selectedOverlayId by mutableStateOf<String?>(initialProject.overlays.firstOrNull()?.id)
 
@@ -119,6 +127,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             value?.loadGlobalFunctions()?.forEach { (name, source) ->
                 PocketScriptInterpreter.parseFunction(source, this)?.let { scriptEnv.globalFunctions[name] = it }
             }
+            scriptEnv.globalStyles.clear()
+            value?.loadGlobalStyles()?.forEach { (name, style) -> scriptEnv.globalStyles[name] = style }
         }
 
     /** ID des aktuell geöffneten (bereits mindestens einmal gespeicherten) Projekts. */
@@ -389,16 +399,29 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         projectGeneration++
         isEditsDialogOpen = false
         editingOverlayId = null
+        lastTimelineEndMs = 0L
+        lastScriptOutput = emptyList()
         project = newProject
-        // Variablen und Funktionen gehören zum Projekt: beim Wechsel die des neuen Projekts laden
-        scriptEnv.variables.clear()
-        newProject.variables.forEach { (name, text) -> scriptEnv.variables[name] = ScriptEnvironment.decode(text) }
-        scriptEnv.functions.clear()
-        newProject.functions.forEach { (name, source) ->
-            PocketScriptInterpreter.parseFunction(source, this)?.let { scriptEnv.functions[name] = it }
-        }
+        restoreScriptEnvFromProject(newProject)
         playheadMs = newProject.resolvePlayablePosition(newProject.trimStartMs)
         selectedOverlayId = newProject.overlays.firstOrNull()?.id
+    }
+
+    /** Restores project-scoped variables, functions, and styles from [p] into [scriptEnv]. */
+    private fun restoreScriptEnvFromProject(p: VideoProject) {
+        scriptEnv.variables.clear()
+        p.variables.forEach { (name, text) -> scriptEnv.variables[name] = ScriptEnvironment.decode(text) }
+        scriptEnv.functions.clear()
+        p.functions.forEach { (name, source) ->
+            PocketScriptInterpreter.parseFunction(source, this)?.let { scriptEnv.functions[name] = it }
+        }
+        scriptEnv.styles.clear()
+        p.styles.forEach { (name, style) -> scriptEnv.styles[name] = style }
+    }
+
+    /** Clamps [ms] into the playable trim range and jumps over any removed middle ranges. */
+    fun clampPlayheadTo(ms: Long) {
+        playheadMs = project.resolvePlayablePosition(ms.coerceIn(project.trimStartMs, project.trimEndMs))
     }
 
     private fun newProjectId(): String = "p_${System.currentTimeMillis()}"
@@ -413,6 +436,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val snapshot = undoStack.removeAt(undoStack.lastIndex)
         redoStack.add(HistorySnapshot(description = snapshot.description, state = project))
         project = snapshot.state.copy(commandLog = project.commandLog)
+        restoreScriptEnvFromProject(project)
         lastCoalesceKey = null
         clampPlayhead()
         return "Rückgängig gemacht: ${snapshot.description}"
@@ -428,6 +452,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val snapshot = redoStack.removeAt(redoStack.lastIndex)
         undoStack.add(HistorySnapshot(description = snapshot.description, state = project))
         project = snapshot.state.copy(commandLog = project.commandLog)
+        restoreScriptEnvFromProject(project)
         lastCoalesceKey = null
         clampPlayhead()
         return "Wiederhergestellt: ${snapshot.description}"
@@ -535,6 +560,9 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         rotationX: Float = project.transform.rotationXDegrees,
         rotationY: Float = project.transform.rotationYDegrees,
         clearTimedRotation: Boolean = false,
+        clearTimedZ: Boolean = clearTimedRotation,
+        clearTimedX: Boolean = clearTimedRotation,
+        clearTimedY: Boolean = clearTimedRotation,
     ) {
         val normZ = ((rotationZ % 360f) + 360f) % 360f
         val normX = ((rotationX % 360f) + 360f) % 360f
@@ -545,15 +573,15 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             if (normX != 0f) add("X ${normX.roundToInt()}°")
         }.joinToString(" · ")
         commitChange("Drehung $label") { p ->
-            val updatedSpans = if (clearTimedRotation) {
+            val updatedSpans = if (clearTimedZ || clearTimedX || clearTimedY) {
                 p.timedFormatSpans.mapNotNull { span ->
                     val stripped = span.copy(
-                        rotationDegrees = null,
-                        rotationEndDegrees = null,
-                        rotationXDegrees = null,
-                        rotationXEndDegrees = null,
-                        rotationYDegrees = null,
-                        rotationYEndDegrees = null,
+                        rotationDegrees = if (clearTimedZ) null else span.rotationDegrees,
+                        rotationEndDegrees = if (clearTimedZ) null else span.rotationEndDegrees,
+                        rotationXDegrees = if (clearTimedX) null else span.rotationXDegrees,
+                        rotationXEndDegrees = if (clearTimedX) null else span.rotationXEndDegrees,
+                        rotationYDegrees = if (clearTimedY) null else span.rotationYDegrees,
+                        rotationYEndDegrees = if (clearTimedY) null else span.rotationYEndDegrees,
                     )
                     if (!stripped.hasAnyEffect()) null else stripped
                 }
@@ -829,19 +857,28 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         if (chunks.isEmpty()) return
 
         val totalMs = project.trimmedDurationMs
-        val perChunkMs = (totalMs / chunks.size).coerceAtLeast(1_200L)
+        val perChunkMs = (totalMs / chunks.size).coerceAtLeast(250L)
 
-        val generated = chunks.mapIndexed { index, chunkText ->
-            val start = project.trimStartMs + index * perChunkMs
-            val end = (start + perChunkMs).coerceAtMost(project.trimEndMs)
-            SubtitleSegment(
-                id = "auto_sub_${index + 1}",
-                startMs = start,
-                endMs = end,
-                text = chunkText,
-                fontId = project.activeFontId,
-            )
+        val generated = chunks.mapIndexedNotNull { index, chunkText ->
+            val start = (project.trimStartMs + index * perChunkMs).coerceAtMost(project.trimEndMs)
+            val end = if (index == chunks.lastIndex) {
+                project.trimEndMs
+            } else {
+                (start + perChunkMs).coerceAtMost(project.trimEndMs)
+            }
+            if (end <= start) {
+                null
+            } else {
+                SubtitleSegment(
+                    id = "auto_sub_${index + 1}",
+                    startMs = start,
+                    endMs = end,
+                    text = chunkText,
+                    fontId = project.activeFontId,
+                )
+            }
         }
+        if (generated.isEmpty()) return
 
         commitChange("Auto-Captions generiert (${generated.size} Segmente)") { p ->
             p.copy(subtitles = generated)
@@ -851,7 +888,21 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
 
     fun setVideoSource(uriString: String?, durationMs: Long, title: String = "Pixel 9 Video") {
         val safeDuration = durationMs.coerceAtLeast(2_000L)
+        val defaultSubMap = defaultDemoSubtitles().associateBy { it.id }
+        val defaultOverlayMap = defaultDemoOverlays().associateBy { it.id }
         commitChange("Video geladen: $title") { p ->
+            val isNewRealVideo = uriString != null && uriString != p.videoUri
+            // Strip unmodified demo placeholders when loading a real video so they do not stick onto user clips
+            val cleanedSubs = if (uriString != null) {
+                p.subtitles.filterNot { sub -> defaultSubMap[sub.id] == sub }
+            } else {
+                p.subtitles
+            }
+            val cleanedOverlays = if (uriString != null) {
+                p.overlays.filterNot { ov -> defaultOverlayMap[ov.id] == ov }
+            } else {
+                p.overlays
+            }
             p.copy(
                 title = title,
                 videoUri = uriString,
@@ -860,7 +911,14 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 trimEndMs = safeDuration,
                 cutMarkers = emptyList(),
                 removedRanges = emptyList(),
+                timedFormatSpans = if (isNewRealVideo) emptyList() else p.timedFormatSpans,
+                subtitles = cleanedSubs,
+                overlays = cleanedOverlays,
             )
+        }
+        lastTimelineEndMs = 0L
+        if (selectedOverlayId != null && project.overlays.none { it.id == selectedOverlayId }) {
+            selectedOverlayId = project.overlays.firstOrNull()?.id
         }
         playheadMs = 0L
     }
@@ -928,20 +986,22 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         return "Befehlsverlauf geleert ($n Einträge) – das Video bleibt unverändert."
     }
 
-    /** Übernimmt Variablen und Funktionen ins Projekt, damit sie mitgespeichert werden (ohne Undo-Schritt). */
+    /** Übernimmt Variablen, Styles und Funktionen ins Projekt, damit sie mitgespeichert werden (ohne Undo-Schritt). */
     private fun syncProjectVariables() {
         val variables = scriptEnv.variables.mapValues { ScriptExpression.format(it.value) }
         val functions = scriptEnv.functions.mapValues { it.value.source }
-        if (variables != project.variables || functions != project.functions) {
-            project = project.copy(variables = variables, functions = functions)
+        val styles = scriptEnv.styles.toMap()
+        if (variables != project.variables || functions != project.functions || styles != project.styles) {
+            project = project.copy(variables = variables, functions = functions, styles = styles)
         }
     }
 
-    /** Schreibt globale Variablen und Funktionen (`global x = 5`, `global def …`) in den Projektspeicher. */
+    /** Schreibt globale Variablen, Styles und Funktionen (`global x = 5`, `global def …`) in den Projektspeicher. */
     fun persistGlobals() {
         val store = projectStore ?: return
         store.saveGlobalVariables(scriptEnv.globals.mapValues { ScriptExpression.format(it.value) })
         store.saveGlobalFunctions(scriptEnv.globalFunctions.mapValues { it.value.source })
+        store.saveGlobalStyles(scriptEnv.globalStyles.toMap())
     }
 
     private fun executeCommandInternal(rawInput: String): String {
@@ -1259,6 +1319,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             "clear", "delete", "del", "remove", "lösche", "loesche", "entferne" -> {
                 val target = args.joinToString(" ").trim()
                 if (target.isEmpty() && verb == "clear") {
+                    scriptEnv.clear()
+                    lastTimelineEndMs = 0L
                     commitChange("Projekt zurückgesetzt") {
                         VideoProject(
                             title = project.title,
@@ -1266,6 +1328,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                             sourceDurationMs = project.sourceDurationMs,
                             trimEndMs = project.sourceDurationMs,
                             customFonts = project.customFonts,
+                            subtitles = if (project.videoUri != null) emptyList() else defaultDemoSubtitles(),
+                            overlays = if (project.videoUri != null) emptyList() else defaultDemoOverlays(),
                         )
                     }
                     resultMessage = "Alle Effekte, Zoom und Schnitte auf Ausgangszustand zurückgesetzt."
@@ -1300,6 +1364,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
             }
 
             "reset" -> {
+                scriptEnv.clear()
+                lastTimelineEndMs = 0L
                 commitChange("Projekt zurückgesetzt") {
                     VideoProject(
                         title = project.title,
@@ -1307,6 +1373,8 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                         sourceDurationMs = project.sourceDurationMs,
                         trimEndMs = project.sourceDurationMs,
                         customFonts = project.customFonts,
+                        subtitles = if (project.videoUri != null) emptyList() else defaultDemoSubtitles(),
+                        overlays = if (project.videoUri != null) emptyList() else defaultDemoOverlays(),
                     )
                 }
                 resultMessage = "Alle Effekte, Zoom und Schnitte auf Ausgangszustand zurückgesetzt."
@@ -1328,7 +1396,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
                 }
             }
             "help", "?" -> {
-                resultMessage = "PocketScript 2.0: demo · Zeitbereich vor oder nach Befehl: 6,9-8,9 caption: Text.red.mono.top == caption 6,9-8,9: Text.red.mono.top · 3D-Achse & Drehung: rotate y 0 -> 360, spin axis, rotate x 0 -> 360, flip, rotate text1 15, spin emoji1 axis · Crop & Move: crop top/bottom/left/right 20%, move up/down/left/right 10% · Zoom: 0-5,9 zoom 0 -> 1, zoom in, zoom 1,8 · Programmieren: let x = 5, global x = 5, for t in 0..12 step 4: …, if caption red: …, def name(a): …, vars · Projekt: save [Name], open <Name>, new [Name], export, show edits, undo, redo, reset"
+                resultMessage = "PocketScript 3.0: demo · Easing & Motion: 0-3 zoom 0 -> 1 ease-out, 0-1,5 fade in, 4,8-5,1 flash, 5-6 shake, 0-8 kenburns, 2-6 pulse 120bpm, move text1 20 80 -> 80 20 ease · Zeitbereiche: last 5, end-3..end, cut1-cut2, 0-50%, +3 · Audio: mute, 2-5 volume 50%, 0-2 audio fade in · Stil: style hook = .gold.big.pop, .#FF5733, .karaoke · Programmieren: let/global/style, for/while/repeat, break/continue, def … return, Listen \$a[0], # Kommentare"
             }
 
             else -> {
@@ -1361,6 +1429,7 @@ class ProjectEngine(initialProject: VideoProject = VideoProject()) {
         val target = rawTarget.trim().lowercase().removeSuffix(".")
         if (target.removePrefix("all ").removePrefix("alle ") in editsWords) return clearEdits() to false
         if (target == "all" || target == "alles" || target == "alle") {
+            lastTimelineEndMs = 0L
             if (project.subtitles.isEmpty() && project.overlays.isEmpty()) {
                 return "Keine Untertitel, Texte oder Emojis vorhanden." to false
             }

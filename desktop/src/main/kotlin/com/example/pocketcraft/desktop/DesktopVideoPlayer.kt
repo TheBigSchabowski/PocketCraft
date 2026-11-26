@@ -71,6 +71,9 @@ class DesktopPreviewController(
     private var speed = 1.0f
 
     @Volatile
+    private var volumeGain = 1.0f
+
+    @Volatile
     private var closed = false
 
     @Volatile
@@ -105,6 +108,10 @@ class DesktopPreviewController(
         if (abs(speed - this.speed) < 0.01f) return
         this.speed = speed
         clockReset = true
+    }
+
+    override fun applyVolume(gain: Float) {
+        volumeGain = gain.coerceIn(0f, 2f)
     }
 
     override fun pause() {
@@ -238,9 +245,11 @@ class DesktopPreviewController(
         val samples = (frame.samples[0] as? ShortBuffer)?.duplicate() ?: return
         samples.position(0)
         val count = samples.remaining()
+        val gain = volumeGain
         if (audioBytes.size < count * 2) audioBytes = ByteArray(count * 2)
         for (i in 0 until count) {
-            val s = samples.get().toInt()
+            val raw = samples.get().toInt()
+            val s = if (abs(gain - 1f) < 0.01f) raw else (raw * gain).toInt().coerceIn(-32768, 32767)
             audioBytes[i * 2] = s.toByte()
             audioBytes[i * 2 + 1] = (s shr 8).toByte()
         }
@@ -287,7 +296,8 @@ fun DesktopVideoPreview(engine: ProjectEngine, videoUri: String, modifier: Modif
         }
     }
 
-    val filterMatrix = remember(engine.project.filter) { FilterMath.colorMatrix(engine.project.filter) }
+    val activeFilter = engine.currentFilter(engine.playheadMs)
+    val filterMatrix = remember(activeFilter) { FilterMath.colorMatrix(activeFilter) }
 
     Canvas(modifier = modifier) {
         frameTick // Neuzeichnen bei jedem neuen Bild

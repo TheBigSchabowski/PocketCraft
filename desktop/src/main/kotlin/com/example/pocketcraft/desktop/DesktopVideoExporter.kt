@@ -12,11 +12,13 @@ import org.bytedeco.javacv.FFmpegFrameRecorder
 import org.bytedeco.javacv.Frame
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ShortBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.coroutines.coroutineContext
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 /**
@@ -157,11 +159,13 @@ object DesktopVideoExporter {
                             }
                         } else if (frame.samples != null && audioChannels > 0) {
                             if (ts < startUs || ts >= endUs) continue
+                            val gain = project.audioGainAt(ts / 1000L)
+                            val audioFrame = if (abs(gain - 1.0f) > 0.01f) scaledAudioFrame(frame, gain) else frame
                             if (tempo != null) {
-                                tempo.push(frame)
+                                tempo.push(audioFrame)
                                 drain(tempo, recorder)
                             } else {
-                                recorder.record(frame)
+                                recorder.record(audioFrame)
                             }
                         }
                     }
@@ -175,6 +179,25 @@ object DesktopVideoExporter {
                 renderer.close()
                 outFrame.close()
             }
+        }
+    }
+
+    /** Returns a copy of [frame] with 16-bit PCM samples multiplied by [gain] without mutating the grabber buffer. */
+    private fun scaledAudioFrame(frame: Frame, gain: Float): Frame {
+        val src = (frame.samples[0] as? ShortBuffer)?.duplicate() ?: return frame
+        src.position(0)
+        val count = src.remaining()
+        val dst = ShortBuffer.allocate(count)
+        for (i in 0 until count) {
+            val s = (src.get().toInt() * gain).roundToInt().coerceIn(-32768, 32767).toShort()
+            dst.put(s)
+        }
+        dst.flip()
+        return Frame().apply {
+            sampleRate = frame.sampleRate
+            audioChannels = frame.audioChannels
+            timestamp = frame.timestamp
+            samples = arrayOf(dst)
         }
     }
 

@@ -54,12 +54,15 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
@@ -437,6 +440,22 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
+                if (activeFilter.vignetteStrength > 0.02f &&
+                    (activeFilter.preset != VideoFilterPreset.NONE || kotlin.math.abs(activeFilter.vignetteStrength - 0.15f) > 0.01f)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawRect(
+                            brush = Brush.radialGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = (activeFilter.vignetteStrength * 0.75f).coerceIn(0f, 0.85f)),
+                                ),
+                                center = Offset(size.width / 2f, size.height / 2f),
+                                radius = size.maxDimension * 0.62f,
+                            ),
+                        )
+                    }
+                }
             } else {
                 ProceduralPreviewBackdrop(
                     playheadMs = engine.playheadMs,
@@ -560,6 +579,15 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             }
         }
 
+        // 3b. Video Fade-In/Out & Flash overlays (consistent with desktop and Android exporters)
+        project.videoFadeAt(engine.playheadMs)?.let { (fadeColorArgb, fadeAlpha) ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(fadeColorArgb).copy(alpha = fadeAlpha)),
+            )
+        }
+
         // 4. Text- & Emoji-Overlays: ziehen = verschieben, antippen = auswählen, ausgewähltes antippen = bearbeiten.
         //    Alle Maße beziehen sich (wie im Export) auf die Referenz-Bühne: ein Overlay sieht in der kleinen
         //    Vorschau (Tastatur offen), in der großen Vorschau und im fertigen Video gleich aus.
@@ -568,7 +596,7 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
         }
         val overlayLayoutDensity = remember(density.density) { Density(density = density.density, fontScale = 1f) }
         project.overlays.forEach { overlay ->
-            if (engine.playheadMs in overlay.startMs..overlay.endMs) {
+            if (overlay.isVisibleAt(engine.playheadMs, project.trimEndMs)) {
                 key(overlay.id) {
                     CanvasOverlayItem(
                         engine = engine,
@@ -585,14 +613,14 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
             }
         }
 
-        // 5. Aktive Untertitel (Captions) mit Wort-für-Wort Karaoke-Highlight
-        val activeSub = project.subtitles.firstOrNull { engine.playheadMs in it.startMs..it.endMs }
+        // 5. Aktive Untertitel (Captions) mit echtem Karaoke-Farbhighlight & Eingangs-Animationen
+        val activeSub = project.subtitleAt(engine.playheadMs)
         if (activeSub != null) {
             val subFont = rememberComposeFontFamily(activeSub.fontId, project.customFonts)
-            val progress = ((engine.playheadMs - activeSub.startMs).toFloat() /
-                (activeSub.endMs - activeSub.startMs).coerceAtLeast(1L)).coerceIn(0f, 1f)
-            val words = activeSub.text.split(" ")
-            val activeWordIdx = (progress * words.size).toInt().coerceIn(0, (words.size - 1).coerceAtLeast(0))
+            val activeWordIdx = activeSub.activeWordIndexAt(engine.playheadMs)
+            val shownText = activeSub.visibleTextAt(engine.playheadMs)
+            val subAlpha = activeSub.alphaAt(engine.playheadMs)
+            val subScale = activeSub.scaleAt(engine.playheadMs)
 
             // Untertitel in denselben Maßen wie im Export (unabhängig von Vorschaugröße und System-Schriftgröße)
             CompositionLocalProvider(
@@ -615,23 +643,51 @@ private fun InteractiveVideoCanvas(engine: ProjectEngine) {
                 Surface(
                     color = Color(activeSub.backgroundColorArgb),
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(10.dp)),
+                    modifier = Modifier
+                        .graphicsLayer {
+                            alpha = subAlpha
+                            scaleX = subScale
+                            scaleY = subScale
+                        }
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(10.dp)),
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text = words.mapIndexed { idx, w ->
-                                if (idx == activeWordIdx && engine.isPlaying) "[$w]" else w
-                            }.joinToString(" "),
-                            color = Color(activeSub.textColorArgb),
-                            fontFamily = subFont,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = activeSub.fontSizeSp.sp,
-                            textAlign = TextAlign.Center,
-                        )
+                        if (activeSub.karaoke) {
+                            val words = shownText.split(Regex("\\s+")).filter { it.isNotEmpty() }
+                            val annotated = buildAnnotatedString {
+                                words.forEachIndexed { idx, w ->
+                                    if (idx > 0) append(' ')
+                                    if (idx == activeWordIdx) {
+                                        withStyle(SpanStyle(color = Color(activeSub.highlightColorArgb))) {
+                                            append(w)
+                                        }
+                                    } else {
+                                        append(w)
+                                    }
+                                }
+                            }
+                            Text(
+                                text = annotated,
+                                color = Color(activeSub.textColorArgb),
+                                fontFamily = subFont,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = activeSub.fontSizeSp.sp,
+                                textAlign = TextAlign.Center,
+                            )
+                        } else {
+                            Text(
+                                text = shownText,
+                                color = Color(activeSub.textColorArgb),
+                                fontFamily = subFont,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = activeSub.fontSizeSp.sp,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                     }
                 }
             }
@@ -663,10 +719,14 @@ private fun CanvasOverlayItem(
     val latestWidth by rememberUpdatedState(canvasWidthPx)
     val latestHeight by rememberUpdatedState(canvasHeightPx)
     val latestStageScale by rememberUpdatedState(stageScale)
+    val atMs = engine.playheadMs
+    val currentScale = overlay.scaleAt(atMs)
+    val currentAlpha = overlay.alphaAt(atMs)
+    val visibleContent = overlay.visibleContentAt(atMs)
     // Breite vor dem Skalieren (Overlay-Größe × Vorschau-Maßstab), ab der der Text umbricht
-    val maxBoxWidthPx = (ExportLayout.overlayMaxBoxWidth(canvasWidthPx, overlay.scale) / stageScale).roundToInt().coerceAtLeast(1)
-    val centerX = overlay.xPercent * canvasWidthPx
-    val centerY = overlay.yPercent * canvasHeightPx
+    val maxBoxWidthPx = (ExportLayout.overlayMaxBoxWidth(canvasWidthPx, currentScale) / stageScale).roundToInt().coerceAtLeast(1)
+    val centerX = overlay.xAt(atMs) * canvasWidthPx
+    val centerY = overlay.yAt(atMs) * canvasHeightPx
 
     Layout(
         modifier = Modifier.fillMaxSize(),
@@ -678,11 +738,12 @@ private fun CanvasOverlayItem(
                 Box(
                     modifier = Modifier
                         .graphicsLayer {
-                            scaleX = overlay.scale * stageScale
-                            scaleY = overlay.scale * stageScale
-                            rotationZ = overlay.rotationZAt(engine.playheadMs)
-                            rotationX = overlay.rotationXAt(engine.playheadMs)
-                            rotationY = overlay.rotationYAt(engine.playheadMs)
+                            alpha = currentAlpha
+                            scaleX = currentScale * stageScale
+                            scaleY = currentScale * stageScale
+                            rotationZ = overlay.rotationZAt(atMs)
+                            rotationX = overlay.rotationXAt(atMs)
+                            rotationY = overlay.rotationYAt(atMs)
                             cameraDistance = 12f
                         }
                         .clip(RoundedCornerShape(10.dp))
@@ -709,12 +770,17 @@ private fun CanvasOverlayItem(
                                 onDragStart = { engine.selectedOverlayId = overlay.id },
                             ) { change, dragAmount ->
                                 change.consume()
-                                // Die Bewegung kommt im gedrehten/skalierten Koordinatensystem der Box an
+                                // Convert local drag delta back through mirror flip (X/Y 180°), Z rotation, and scale
                                 val current = latestOverlay
-                                val angle = Math.toRadians(current.rotationZAt(engine.playheadMs).toDouble())
-                                val factor = current.scale * latestStageScale
-                                val dx = (dragAmount.x * cos(angle) - dragAmount.y * sin(angle)).toFloat() * factor
-                                val dy = (dragAmount.x * sin(angle) + dragAmount.y * cos(angle)).toFloat() * factor
+                                val ms = engine.playheadMs
+                                val rotZ = Math.toRadians(current.rotationZAt(ms).toDouble())
+                                val signX = if (cos(Math.toRadians(current.rotationYAt(ms).toDouble())) < 0.0) -1f else 1f
+                                val signY = if (cos(Math.toRadians(current.rotationXAt(ms).toDouble())) < 0.0) -1f else 1f
+                                val factor = current.scaleAt(ms) * latestStageScale
+                                val localDx = dragAmount.x * signX
+                                val localDy = dragAmount.y * signY
+                                val dx = (localDx * cos(rotZ) - localDy * sin(rotZ)).toFloat() * factor
+                                val dy = (localDx * sin(rotZ) + localDy * cos(rotZ)).toFloat() * factor
                                 engine.moveOverlay(
                                     current.id,
                                     current.xPercent + dx / latestWidth,
@@ -728,7 +794,7 @@ private fun CanvasOverlayItem(
                     when (overlay.kind) {
                         OverlayKind.EMOJI -> {
                             Text(
-                                text = overlay.content,
+                                text = visibleContent,
                                 fontSize = 36.sp,
                             )
                         }
@@ -738,7 +804,7 @@ private fun CanvasOverlayItem(
                                 shape = RoundedCornerShape(8.dp),
                             ) {
                                 Text(
-                                    text = overlay.content,
+                                    text = visibleContent,
                                     color = Color(overlay.colorArgb),
                                     fontFamily = fontFamily,
                                     fontWeight = FontWeight.ExtraBold,

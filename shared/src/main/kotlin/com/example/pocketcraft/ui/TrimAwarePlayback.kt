@@ -19,6 +19,7 @@ interface PreviewPlaybackController {
     fun seekTo(ms: Long)
     fun start(speed: Float)
     fun applySpeed(speed: Float)
+    fun applyVolume(gain: Float) {}
     fun pause()
 }
 
@@ -50,12 +51,14 @@ fun TrimAwarePlaybackEffects(engine: ProjectEngine, controller: PreviewPlaybackC
         engine.playheadMs = target
         var lastReported = target
         var ignoreUntil = System.currentTimeMillis() + 400L
+        controller.applyVolume(engine.project.audioGainAt(target))
         controller.start(engine.project.playbackSpeed)
 
         while (isActive && engine.isPlaying) {
             delay(30L)
             val p = engine.project
             controller.applySpeed(p.playbackSpeed)
+            controller.applyVolume(p.audioGainAt(engine.playheadMs))
 
             // Nutzer hat während des Abspielens auf der Timeline gescrubbt -> dorthin springen
             if (abs(engine.playheadMs - lastReported) > 250L) {

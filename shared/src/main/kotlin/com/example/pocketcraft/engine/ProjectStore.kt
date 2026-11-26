@@ -127,6 +127,25 @@ class ProjectStore(private val dir: File) {
         }
     }
 
+    private val globalStylesFile: File get() = File(dir, "globals.styles")
+
+    /** Global PocketScript modifier styles (`global style hook = .gold.big`) shared across projects. */
+    fun loadGlobalStyles(): Map<String, String> = try {
+        globalStylesFile.takeIf { it.exists() }
+            ?.let { json.decodeFromString(variablesSerializer, it.readText()) }
+            ?: emptyMap()
+    } catch (_: Exception) {
+        emptyMap()
+    }
+
+    fun saveGlobalStyles(styles: Map<String, String>) {
+        try {
+            dir.mkdirs()
+            globalStylesFile.writeText(json.encodeToString(variablesSerializer, styles))
+        } catch (_: Exception) {
+        }
+    }
+
     private val variablesSerializer = MapSerializer(String.serializer(), String.serializer())
 
     fun lastOpenedId(): String? = try {

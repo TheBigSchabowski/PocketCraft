@@ -1,6 +1,7 @@
 package com.example.pocketcraft.engine
 
 import com.example.pocketcraft.model.CanvasOverlay
+import com.example.pocketcraft.model.EasingCurve
 import com.example.pocketcraft.model.OverlayKind
 import kotlin.math.roundToInt
 
@@ -8,13 +9,10 @@ import kotlin.math.roundToInt
  * Befehle, die ein bereits vorhandenes Text- oder Emoji-Overlay nachträglich ändern:
  *
  * - `texts` / `emojis` / `overlays` → nummerierte Liste (text1, text2, … nach Startzeit)
- * - `move text1 10%u` · `move text1 up 10` · `move text1 50 20` · `move text1 top` → verschieben
- * - `edit text1: Neuer Text` · `edit text1: Neuer Text.red.big` · `edit text1: .gold` → Inhalt/Stil ändern
- * - `size text1 150` · `size text1 big` · `size text1 +20` → Größe ändern
- *
- * Angesprochen wird ein Element über seine Nummer (`text1`, `emoji2`), über einen Teil seines Inhalts
- * (`text Abend`), als Gruppe (`texts`, `all emojis`) oder – ohne Zusatz (`text`) – das ausgewählte bzw.
- * gerade sichtbare Element.
+ * - `move text1 10%u` · `move text1 20 80 -> 80 20 ease` · `move text1 top` → verschieben (auch animiert)
+ * - `edit text1: Neuer Text` · `edit text1: Neuer Text.red.big.pop` · `edit text1: .gold` → Inhalt/Stil ändern
+ * - `size text1 150` · `size text1 50 -> 200 bounce` · `size text1 +20` → Größe ändern (auch animiert)
+ * - `rotate text1 15` · `spin emoji1 axis` · `pulse emoji1 120bpm` → drehen & im Takt pulsieren
  */
 internal object OverlayCommands {
 
@@ -28,15 +26,18 @@ internal object OverlayCommands {
     private val editVerbs = setOf("edit", "change", "ändere", "aendere", "bearbeite")
     private val sizeVerbs = setOf("size", "scale", "größe", "groesse", "grösse")
     private val rotateVerbs = setOf("rotate", "rot", "spin", "turn", "drehen", "flip", "mirror")
+    private val pulseVerbs = setOf("pulse", "puls")
 
     private const val MOVE_SYNTAX =
-        "Syntax: move text1 down 10% · move text1 up 10% · move text1 50 20 · move text1 top|center|bottom – 'texts' zeigt die Nummern."
+        "Syntax: move text1 down 10% · move text1 20 80 -> 80 20 ease · move text1 top|center|bottom – 'texts' zeigt die Nummern."
     private const val EDIT_SYNTAX =
-        "Syntax: edit text1: Neuer Text (mit Stil: edit text1: Neuer Text.red.big.spinaxis, nur Stil: edit text1: .gold) – 'texts' zeigt die Nummern."
+        "Syntax: edit text1: Neuer Text (mit Stil: edit text1: Neuer Text.red.big.pop, nur Stil: edit text1: .gold) – 'texts' zeigt die Nummern."
     private const val SIZE_SYNTAX =
-        "Syntax: size text1 150 (Prozent) · size text1 big|small|huge · size text1 +20 – 'texts' zeigt die Nummern."
+        "Syntax: size text1 150 (Prozent) · size text1 50 -> 200 bounce · size text1 +20 – 'texts' zeigt die Nummern."
     private const val ROTATE_SYNTAX =
-        "Syntax: rotate text1 15 · rotate emoji1 y 0 -> 360 · spin emoji1 axis · spin emoji1 x 2x · flip emoji1 – 'texts'/'emojis' zeigt die Nummern."
+        "Syntax: rotate text1 15 · rotate emoji1 y 0 -> 360 ease · spin emoji1 axis · flip emoji1 – 'texts'/'emojis' zeigt die Nummern."
+    private const val PULSE_SYNTAX =
+        "Syntax: pulse emoji1 [120bpm | off] · pulse text1 128 – 'texts'/'emojis' zeigt die Nummern."
 
     /** Führt [verb] aus, falls es ein Overlay-Befehl ist; sonst `null`. Ergebnis: Meldung + Fehler-Flag. */
     fun tryExecute(verb: String, rawArgs: String, engine: ProjectEngine): Pair<String, Boolean>? {
@@ -47,6 +48,7 @@ internal object OverlayCommands {
             verb in editVerbs -> edit(rawArgs.trim(), engine)
             verb in sizeVerbs -> size(args, engine)
             verb in rotateVerbs && startsWithReference(args) -> rotate(verb, args, engine)
+            verb in pulseVerbs && startsWithReference(args) -> pulse(args, engine)
             else -> null
         }
     }
@@ -120,7 +122,6 @@ internal object OverlayCommands {
             all || word.endsWith("s") || word == "texte" -> Selection(sorted)
 
             else -> {
-                // Ohne Nummer: das ausgewählte Element, sonst das gerade sichtbare, sonst das einzige.
                 val selected = sorted.firstOrNull { it.id == engine.selectedOverlayId }
                 val visible = sorted.filter { engine.playheadMs in it.startMs..it.endMs }
                 when {
@@ -165,10 +166,17 @@ internal object OverlayCommands {
                 if (ov.rotationXDegrees != 0f || ov.rotationXEndDegrees != null) {
                     add(if (ov.rotationXEndDegrees != null) "rotX ${ov.rotationXDegrees.roundToInt()}->${ov.rotationXEndDegrees.roundToInt()}°" else "rotX ${ov.rotationXDegrees.roundToInt()}°")
                 }
+                if (ov.pulseBpm != null) add("pulse ${ov.pulseBpm.roundToInt()}bpm")
             }
             val rotSuffix = if (rotParts.isEmpty()) "" else ", ${rotParts.joinToString(" ")}"
+            val posText = if (ov.xEndPercent != null && ov.yEndPercent != null) {
+                "x${pct(ov.xPercent)}->${pct(ov.xEndPercent)}% y${pct(ov.yPercent)}->${pct(ov.yEndPercent)}%"
+            } else {
+                "x${pct(ov.xPercent)}% y${pct(ov.yPercent)}%"
+            }
+            val sizeText = if (ov.scaleEnd != null) "Größe ${pct(ov.scale)}->${pct(ov.scaleEnd)}%" else "Größe ${pct(ov.scale)}%"
             "${refName(kinds)}${i + 1}: \"${ov.content}\" (${ProjectEngine.formatSec(ov.startMs)}–${ProjectEngine.formatSec(ov.endMs)}, " +
-                "x${pct(ov.xPercent)}% y${pct(ov.yPercent)}%, Größe ${pct(ov.scale)}%$rotSuffix)"
+                "$posText, $sizeText$rotSuffix)"
         }.joinToString(" · ")
     }
 
@@ -201,7 +209,7 @@ internal object OverlayCommands {
     private fun isPositionToken(token: String): Boolean {
         val t = token.lowercase()
         return t in positionWords || numberRegex.matches(t) || moveSuffixRegex.matches(t) ||
-            movePrefixRegex.matches(t) || axisRegex.matches(t)
+            movePrefixRegex.matches(t) || axisRegex.matches(t) || t == "->" || t == "→"
     }
 
     private class Placement {
@@ -226,6 +234,9 @@ internal object OverlayCommands {
             "r", "right", "rechts" -> dx += amount
             else -> dx -= amount // l, left, links
         }
+
+        fun applyTo(baseX: Float, baseY: Float): Pair<Float, Float> =
+            ((absX ?: baseX) + dx).coerceIn(0.05f, 0.95f) to ((absY ?: baseY) + dy).coerceIn(0.05f, 0.95f)
     }
 
     private fun parsePlacement(tokens: List<String>): Placement? {
@@ -247,7 +258,6 @@ internal object OverlayCommands {
                     val value = (number(axis.groupValues[2]) / 100f).coerceIn(0f, 1f)
                     if (axis.groupValues[1].lowercase() == "x") placement.absX = value else placement.absY = value
                 }
-                // `up 10` / `links 5%`: Richtung mit Betrag; `up` allein = ein Schritt von 10 %
                 isDirection -> {
                     val amount = if (next != null && numberRegex.matches(next)) {
                         i++
@@ -261,7 +271,6 @@ internal object OverlayCommands {
                 token in bottomWords -> placement.absY = 0.84f
                 token in centerWords -> {
                     placement.absX = 0.5f
-                    // `top center` / `mitte unten`: nur waagerecht zentrieren, wenn die Höhe schon genannt ist
                     if (tokens.none { it.lowercase() in topWords || it.lowercase() in bottomWords }) placement.absY = 0.5f
                 }
                 numberRegex.matches(token) -> numbers.add(number(token.removeSuffix("%")))
@@ -272,7 +281,6 @@ internal object OverlayCommands {
         when (numbers.size) {
             0 -> Unit
             2 -> {
-                // `50 20` = Prozent, `0.5 0.2` = Anteil
                 val divisor = if (numbers.all { it <= 1f }) 1f else 100f
                 placement.absX = (numbers[0] / divisor).coerceIn(0f, 1f)
                 placement.absY = (numbers[1] / divisor).coerceIn(0f, 1f)
@@ -280,6 +288,12 @@ internal object OverlayCommands {
             else -> return null
         }
         return placement.takeIf { it.changesAnything }
+    }
+
+    private fun extractTrailingEasing(tokens: List<String>): Pair<List<String>, EasingCurve?> {
+        val last = tokens.lastOrNull() ?: return tokens to null
+        val curve = EasingCurve.fromToken(last) ?: return tokens to null
+        return tokens.dropLast(1) to curve
     }
 
     private fun move(args: List<String>, engine: ProjectEngine): Pair<String, Boolean> {
@@ -291,7 +305,6 @@ internal object OverlayCommands {
             after.size >= 2 &&
             intRegex.matches(after[0]) &&
             (after[0].toIntOrNull() ?: 0) in 1..count &&
-            // `move text 50 20` ist eine Position, `move text 1 50 20` meint text1
             !(after.size == 2 && after.all { numberRegex.matches(it) })
         var split = head
         if (spacedIndex) {
@@ -302,8 +315,47 @@ internal object OverlayCommands {
 
         val selection = resolve(args.take(split), engine, MOVE_SYNTAX)
         selection.error?.let { return it to true }
-        val placement = parsePlacement(args.drop(split)) ?: return MOVE_SYNTAX to true
 
+        val rawSpecTokens = args.drop(split)
+        val (specTokens, trailingEasing) = extractTrailingEasing(rawSpecTokens)
+        val normalizedSpec = specTokens.joinToString(" ")
+            .replace(Regex("""\s*(?:->|→)\s*"""), " -> ")
+            .split(Regex("\\s+"))
+            .filter { it.isNotEmpty() }
+
+        val arrowIdx = normalizedSpec.indexOf("->")
+        if (arrowIdx >= 0) {
+            val startTokens = normalizedSpec.subList(0, arrowIdx)
+            val endTokens = normalizedSpec.subList(arrowIdx + 1, normalizedSpec.size)
+            val startPlacement = parsePlacement(startTokens) ?: return MOVE_SYNTAX to true
+            val endPlacement = parsePlacement(endTokens) ?: return MOVE_SYNTAX to true
+            val easing = trailingEasing ?: EasingCurve.LINEAR
+            val ids = selection.targets.map { it.id }.toSet()
+            engine.commitChange("${describe(selection.targets)} animiert verschoben") { p ->
+                p.copy(
+                    overlays = p.overlays.map { ov ->
+                        if (ov.id !in ids) {
+                            ov
+                        } else {
+                            val (sx, sy) = startPlacement.applyTo(ov.xPercent, ov.yPercent)
+                            val (ex, ey) = endPlacement.applyTo(sx, sy)
+                            ov.copy(
+                                xPercent = sx,
+                                yPercent = sy,
+                                xEndPercent = ex,
+                                yEndPercent = ey,
+                                easing = easing,
+                            )
+                        }
+                    },
+                )
+            }
+            val moved = engine.project.overlays.first { it.id == selection.targets.first().id }
+            focus(engine, moved)
+            return "${describe(selection.targets)} animiert verschoben (${pct(moved.xPercent)}% ${pct(moved.yPercent)}% -> ${pct(moved.xEndPercent ?: moved.xPercent)}% ${pct(moved.yEndPercent ?: moved.yPercent)}%)." to false
+        }
+
+        val placement = parsePlacement(specTokens) ?: return MOVE_SYNTAX to true
         val ids = selection.targets.map { it.id }.toSet()
         engine.commitChange("${describe(selection.targets)} verschoben") { p ->
             p.copy(
@@ -311,9 +363,12 @@ internal object OverlayCommands {
                     if (ov.id !in ids) {
                         ov
                     } else {
+                        val (nx, ny) = placement.applyTo(ov.xPercent, ov.yPercent)
                         ov.copy(
-                            xPercent = ((placement.absX ?: ov.xPercent) + placement.dx).coerceIn(0.05f, 0.95f),
-                            yPercent = ((placement.absY ?: ov.yPercent) + placement.dy).coerceIn(0.05f, 0.95f),
+                            xPercent = nx,
+                            yPercent = ny,
+                            xEndPercent = null,
+                            yEndPercent = null,
                         )
                     }
                 },
@@ -331,8 +386,6 @@ internal object OverlayCommands {
         val tokens = rawArgs.split(Regex("\\s+")).filter { it.isNotEmpty() }
         if (!startsWithReference(tokens)) return EDIT_SYNTAX to true
 
-        // `edit text1 Neuer Text` und `edit text1: Neuer Text` – mit Nummer ist klar, wo der neue Text beginnt.
-        // Sonst trennt der erste Doppelpunkt: `edit text Abend: Neuer Text`.
         val head = if (tokens.first().lowercase() in allWords) 2 else 1
         val hasNumber = kindWordRegex.matchEntire(tokens[head - 1])?.groupValues?.get(2)?.isNotEmpty() == true
         val refTokens: List<String>
@@ -353,7 +406,6 @@ internal object OverlayCommands {
         val selection = resolve(refTokens, engine, EDIT_SYNTAX)
         selection.error?.let { return it to true }
 
-        // `.gold.big` ohne Text davor ändert nur den Stil
         val styleProbe = if (payload.startsWith(".")) PocketScriptParser.parseDotModifiers("x$payload", engine) else null
         val styleOnly = styleProbe?.cleanText == "x"
         val styled = if (styleProbe != null && styleOnly) styleProbe else PocketScriptParser.parseDotModifiers(payload, engine)
@@ -373,6 +425,7 @@ internal object OverlayCommands {
                             backgroundArgb = styled.bgColorArgb?.takeIf { isText } ?: ov.backgroundArgb,
                             fontId = styled.fontId?.takeIf { isText } ?: ov.fontId,
                             scale = styled.scale ?: ov.scale,
+                            scaleEnd = if (styled.scale != null) null else ov.scaleEnd,
                             yPercent = styled.yPercent ?: ov.yPercent,
                             rotationDegrees = styled.rotationDegrees ?: ov.rotationDegrees,
                             rotationEndDegrees = if (styled.rotationDegrees != null) styled.rotationEndDegrees else ov.rotationEndDegrees,
@@ -380,6 +433,9 @@ internal object OverlayCommands {
                             rotationXEndDegrees = if (styled.rotationXDegrees != null) styled.rotationXEndDegrees else ov.rotationXEndDegrees,
                             rotationYDegrees = styled.rotationYDegrees ?: ov.rotationYDegrees,
                             rotationYEndDegrees = if (styled.rotationYDegrees != null) styled.rotationYEndDegrees else ov.rotationYEndDegrees,
+                            easing = styled.easing ?: ov.easing,
+                            animation = styled.animation ?: ov.animation,
+                            pulseBpm = styled.pulseBpm ?: ov.pulseBpm,
                         )
                     }
                 },
@@ -398,39 +454,106 @@ internal object OverlayCommands {
 
     private val sizeValueRegex = Regex("""^([+-])?($NUM)(%|x)?$""", RegexOption.IGNORE_CASE)
 
+    private fun namedScale(token: String): Float? = when (token.lowercase()) {
+        "small", "klein", "sm" -> 0.78f
+        "normal", "mittel", "medium" -> 1.0f
+        "big", "gross", "groß", "large", "xl" -> 1.45f
+        "huge", "riesig", "xxl" -> 1.85f
+        else -> null
+    }
+
+    private fun parseSizeToken(token: String, current: Float): Float? {
+        namedScale(token)?.let { return it }
+        val m = sizeValueRegex.matchEntire(token.lowercase()) ?: return null
+        val sign = m.groupValues[1]
+        val value = number(m.groupValues[2])
+        val unit = m.groupValues[3].lowercase()
+        val factor = when {
+            unit == "x" -> value
+            unit == "%" -> value / 100f
+            // Relative changes like `+5` or `+20` without `x` mean +/- percent when >= 1
+            sign.isNotEmpty() -> if (value < 1f) value else value / 100f
+            value <= 5f -> value
+            else -> value / 100f
+        }
+        return when (sign) {
+            "+" -> current + factor
+            "-" -> current - factor
+            else -> factor
+        }.coerceIn(0.4f, 3.5f)
+    }
+
     private fun size(args: List<String>, engine: ProjectEngine): Pair<String, Boolean> {
         if (!startsWithReference(args) || args.size < 2) return SIZE_SYNTAX to true
-        val valueToken = args.last().lowercase()
-        val named = when (valueToken) {
-            "small", "klein", "sm" -> 0.78f
-            "normal", "mittel", "medium" -> 1.0f
-            "big", "gross", "groß", "large", "xl" -> 1.45f
-            "huge", "riesig", "xxl" -> 1.85f
-            else -> null
-        }
-        val valueMatch = sizeValueRegex.matchEntire(valueToken)
-        if (named == null && valueMatch == null) return SIZE_SYNTAX to true
 
-        val selection = resolve(args.dropLast(1), engine, SIZE_SYNTAX)
+        // Check for animated range: `size emoji1 50 -> 200 [bounce]`
+        val head = if (args.first().lowercase() in allWords) 2 else 1
+        val kindMatch = kindWordRegex.matchEntire(args[head - 1])
+        val count = kindMatch?.let { numbered(kindsOf(it.groupValues[1]), engine).size } ?: 0
+        val after = args.drop(head)
+        val spacedIndex = kindMatch?.groupValues?.get(2).isNullOrEmpty() &&
+            after.size >= 2 &&
+            intRegex.matches(after[0]) &&
+            (after[0].toIntOrNull() ?: 0) in 1..count
+        var split = if (spacedIndex) head + 1 else head
+        while (split < args.size) {
+            val tok = args[split].lowercase()
+            val isSizeSpec = namedScale(tok) != null || sizeValueRegex.matches(tok) ||
+                tok == "->" || tok == "→" || tok.contains("->") || tok.contains("→") ||
+                EasingCurve.fromToken(tok) != null
+            if (isSizeSpec) break
+            split++
+        }
+
+        val selection = resolve(args.take(split), engine, SIZE_SYNTAX)
         selection.error?.let { return it to true }
 
-        fun newScale(current: Float): Float {
-            if (named != null) return named
-            val sign = valueMatch!!.groupValues[1]
-            val value = number(valueMatch.groupValues[2])
-            val unit = valueMatch.groupValues[3].lowercase()
-            // `150` / `150%` = Prozent, `1.5` / `1.5x` = Faktor
-            val asFactor = if (unit == "x" || (unit.isEmpty() && value <= 5f)) value else value / 100f
-            return when (sign) {
-                "+" -> current + asFactor
-                "-" -> current - asFactor
-                else -> asFactor
+        val rawSpec = args.drop(split)
+        if (rawSpec.isEmpty()) return SIZE_SYNTAX to true
+        val (specTokens, trailingEasing) = extractTrailingEasing(rawSpec)
+        val normalized = specTokens.joinToString(" ")
+            .replace(Regex("""\s*(?:->|→)\s*"""), " -> ")
+            .split(Regex("\\s+"))
+            .filter { it.isNotEmpty() }
+
+        if (normalized.size == 3 && normalized[1] == "->") {
+            val startProbe = parseSizeToken(normalized[0], 1f) ?: return SIZE_SYNTAX to true
+            val endProbe = parseSizeToken(normalized[2], startProbe) ?: return SIZE_SYNTAX to true
+            val easing = trailingEasing ?: EasingCurve.LINEAR
+            val ids = selection.targets.map { it.id }.toSet()
+            engine.commitChange("Größe von ${describe(selection.targets)} animiert") { p ->
+                p.copy(
+                    overlays = p.overlays.map { ov ->
+                        if (ov.id !in ids) ov
+                        else {
+                            val s0 = parseSizeToken(normalized[0], ov.scale) ?: startProbe
+                            val s1 = parseSizeToken(normalized[2], s0) ?: endProbe
+                            ov.copy(scale = s0, scaleEnd = s1, easing = easing)
+                        }
+                    },
+                )
             }
+            val resized = engine.project.overlays.first { it.id == selection.targets.first().id }
+            focus(engine, resized)
+            return "Größe von ${describe(selection.targets)}: ${pct(resized.scale)}% -> ${pct(resized.scaleEnd ?: resized.scale)}%." to false
         }
+
+        if (normalized.size != 1 || trailingEasing != null) return SIZE_SYNTAX to true
+        val valueToken = normalized.single()
+        parseSizeToken(valueToken, 1f) ?: return SIZE_SYNTAX to true
 
         val ids = selection.targets.map { it.id }.toSet()
         engine.commitChange("Größe von ${describe(selection.targets)} geändert") { p ->
-            p.copy(overlays = p.overlays.map { ov -> if (ov.id in ids) ov.copy(scale = newScale(ov.scale).coerceIn(0.4f, 3.5f)) else ov })
+            p.copy(
+                overlays = p.overlays.map { ov ->
+                    if (ov.id in ids) {
+                        val next = parseSizeToken(valueToken, ov.scale) ?: ov.scale
+                        ov.copy(scale = next, scaleEnd = null)
+                    } else {
+                        ov
+                    }
+                },
+            )
         }
         val resized = engine.project.overlays.first { it.id == selection.targets.first().id }
         focus(engine, resized)
@@ -464,6 +587,7 @@ internal object OverlayCommands {
                     if (ov.id !in ids) {
                         ov
                     } else {
+                        val nextEasing = if (parsed.easing != EasingCurve.LINEAR) parsed.easing else ov.easing
                         when (parsed.axis) {
                             PocketScriptParser.RotationAxis.Z -> {
                                 val nextZ = when {
@@ -473,6 +597,7 @@ internal object OverlayCommands {
                                 ov.copy(
                                     rotationDegrees = nextZ,
                                     rotationEndDegrees = parsed.endDegrees,
+                                    easing = nextEasing,
                                 )
                             }
                             PocketScriptParser.RotationAxis.X -> {
@@ -484,6 +609,7 @@ internal object OverlayCommands {
                                 ov.copy(
                                     rotationXDegrees = nextX,
                                     rotationXEndDegrees = parsed.endDegrees,
+                                    easing = nextEasing,
                                 )
                             }
                             PocketScriptParser.RotationAxis.Y -> {
@@ -495,6 +621,7 @@ internal object OverlayCommands {
                                 ov.copy(
                                     rotationYDegrees = nextY,
                                     rotationYEndDegrees = parsed.endDegrees,
+                                    easing = nextEasing,
                                 )
                             }
                         }
@@ -520,5 +647,41 @@ internal object OverlayCommands {
             "${currentVal.roundToInt()}°"
         }
         return "${describe(selection.targets)} um $axisLabel gedreht ($angleDesc)." to false
+    }
+
+    // ------------------------------------------------------------------ pulse
+
+    private fun pulse(args: List<String>, engine: ProjectEngine): Pair<String, Boolean> {
+        val head = if (args.first().lowercase() in allWords) 2 else 1
+        val after = args.drop(head)
+        val kindMatch = kindWordRegex.matchEntire(args[head - 1])
+        val count = kindMatch?.let { numbered(kindsOf(it.groupValues[1]), engine).size } ?: 0
+        val spacedIndex = kindMatch?.groupValues?.get(2).isNullOrEmpty() &&
+            after.size >= 1 &&
+            intRegex.matches(after[0]) &&
+            (after[0].toIntOrNull() ?: 0) in 1..count
+        val split = if (spacedIndex) head + 1 else head
+
+        val selection = resolve(args.take(split), engine, PULSE_SYNTAX)
+        selection.error?.let { return it to true }
+
+        val specTokens = args.drop(split)
+        val last = specTokens.firstOrNull()?.lowercase()?.trim()
+        val targetBpm: Float? = when {
+            last == null -> engine.project.bpm ?: 120f
+            last in listOf("off", "aus", "0") -> null
+            else -> {
+                val parsed = last.removeSuffix("bpm").replace(",", ".").toFloatOrNull()
+                    ?: return PULSE_SYNTAX to true
+                parsed.coerceIn(20f, 300f)
+            }
+        }
+        val ids = selection.targets.map { it.id }.toSet()
+        engine.commitChange("${describe(selection.targets)} Puls ${targetBpm?.let { "${it.roundToInt()} BPM" } ?: "aus"}") { p ->
+            p.copy(overlays = p.overlays.map { ov -> if (ov.id in ids) ov.copy(pulseBpm = targetBpm) else ov })
+        }
+        val updated = engine.project.overlays.first { it.id == selection.targets.first().id }
+        focus(engine, updated)
+        return (if (targetBpm != null) "${describe(selection.targets)} pulsiert mit ${targetBpm.roundToInt()} BPM." else "Puls von ${describe(selection.targets)} deaktiviert.") to false
     }
 }

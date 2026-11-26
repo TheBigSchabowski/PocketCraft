@@ -331,11 +331,14 @@ private fun CropAndZoomToolView(engine: ProjectEngine) {
         }
 
         // Stufenloser Zoom-Regler (0.2x bis 5.0x – < 1.0x startet/verkleinert in der Mitte)
+        val hasTimedZoomAtPlayhead = engine.project.timedFormatSpans.any {
+            engine.playheadMs in it.startMs..it.endMs && it.zoom != null
+        }
         CompactSliderRow(
             label = "Zoom (${(t.zoom * 100).roundToInt()}%)",
             value = t.zoom.coerceIn(0.2f, 5.0f),
             valueRange = 0.2f..5.0f,
-            onValueChange = { engine.setZoomAndPan(zoom = it) },
+            onValueChange = { engine.setZoomAndPan(zoom = it, clearTimedZoom = hasTimedZoomAtPlayhead) },
         )
 
         // Bildränder kleiner schneiden (Crop Inset Regler)
@@ -406,19 +409,22 @@ private fun TrimAndCutToolView(engine: ProjectEngine) {
             )
         }
 
+        val maxStart = (endSec - 0.5f).coerceAtLeast(0.01f)
         CompactSliderRow(
             label = "Start (${ProjectEngine.formatSec(p.trimStartMs)})",
-            value = startSec,
-            valueRange = 0f..(endSec - 0.5f).coerceAtLeast(0.5f),
+            value = startSec.coerceIn(0f, maxStart),
+            valueRange = 0f..maxStart,
             onValueChange = { newStart ->
                 engine.setTrimRange((newStart * 1000).toLong(), p.trimEndMs)
             },
         )
 
+        val minEnd = (startSec + 0.5f).coerceAtMost(totalSec)
+        val safeEndMax = maxOf(totalSec, minEnd + 0.01f)
         CompactSliderRow(
             label = "Ende (${ProjectEngine.formatSec(p.trimEndMs)})",
-            value = endSec,
-            valueRange = (startSec + 0.5f)..totalSec,
+            value = endSec.coerceIn(minEnd, safeEndMax),
+            valueRange = minEnd..safeEndMax,
             onValueChange = { newEnd ->
                 engine.setTrimRange(p.trimStartMs, (newEnd * 1000).toLong())
             },

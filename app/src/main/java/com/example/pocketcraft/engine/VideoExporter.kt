@@ -17,18 +17,21 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.text.Layout
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.style.ForegroundColorSpan
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BitmapOverlay
-import androidx.media3.effect.Brightness
-import androidx.media3.effect.Contrast
 import androidx.media3.effect.GaussianBlur
 import androidx.media3.effect.MatrixTransformation
 import androidx.media3.effect.OverlayEffect
@@ -58,9 +61,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -177,7 +182,7 @@ object VideoExporter {
         val videoEffects = mutableListOf<Effect>()
         videoEffects.add(Presentation.createForWidthAndHeight(size.width, size.height, Presentation.LAYOUT_SCALE_TO_FIT))
         videoEffects.add(transformEffect(project, clock, size))
-        videoEffects.addAll(colorEffects(project.filter))
+        videoEffects.addAll(colorEffects(project, clock))
         if (project.blur.mode == BlurMode.FULL_FRAME && project.blur.radiusPx > 0.5f) {
             val sigma = (project.blur.radiusPx * 0.65f * dpScale(size, project) / 2f).coerceIn(1f, 60f)
             videoEffects.add(GaussianBlur(sigma))
@@ -195,8 +200,13 @@ object VideoExporter {
         )
 
         val audioProcessors = mutableListOf<AudioProcessor>()
+        val hasAudioGainChange = abs(project.audioVolume - 1f) > 0.01f ||
+            project.timedFormatSpans.any { it.audioVolumeStart != null }
+        if (hasAudioGainChange) {
+            audioProcessors.add(VolumeFadeAudioProcessor(project, startMs))
+        }
         val speed = project.playbackSpeed
-        if (kotlin.math.abs(speed - 1f) > 0.01f) {
+        if (abs(speed - 1f) > 0.01f) {
             // Zuletzt: verändert die Zeitstempel, alle Effekte davor sehen noch Quellzeit
             videoEffects.add(SpeedChangeEffect(speed))
             audioProcessors.add(SonicAudioProcessor().apply { setSpeed(speed) })
@@ -235,63 +245,34 @@ object VideoExporter {
         }
     }
 
-    /** Farbfilter (Preset + Feinjustierung) als Media3-Effekte. */
-    private fun colorEffects(config: FilterConfig): List<Effect> {
-        val preset = config.preset
-        val intensity = config.intensity.coerceIn(0f, 1f)
-        val isNeutral = preset == VideoFilterPreset.NONE &&
-            config.brightnessOffset == 0f &&
-            config.contrastMultiplier == 1f &&
-            config.saturationMultiplier == 1f
-        if (isNeutral || intensity <= 0f) return emptyList()
-
-        val effects = mutableListOf<Effect>()
-        val contrast = 1f + ((preset.contrast * config.contrastMultiplier) - 1f) * intensity
-        val saturation = (1f + ((preset.saturation * config.saturationMultiplier) - 1f) * intensity).coerceAtLeast(0f)
-        val brightness = ((preset.brightness + config.brightnessOffset) * intensity).coerceIn(-1f, 1f)
-        val warmth = preset.warmth * intensity * 35f / 255f
-        val sepia = (preset.sepia * intensity).coerceIn(0f, 1f)
-
-        val cm = android.graphics.ColorMatrix().apply { setSaturation(saturation) }
-        cm.postConcat(
-            android.graphics.ColorMatrix(
-                floatArrayOf(
-                    1f + warmth * 2f, 0f, 0f, 0f, 0f,
-                    0f, 1f, 0f, 0f, 0f,
-                    0f, 0f, (1f - warmth * 2f).coerceAtLeast(0f), 0f, 0f,
-                    0f, 0f, 0f, 1f, 0f,
-                ),
-            ),
+    /** Dynamic per-frame color filter (supports both global filter and timed filter spans). */
+    private fun colorEffects(project: VideoProject, clock: SegmentClock): List<Effect> {
+        val hasTimedFilter = project.timedFormatSpans.any { it.filterPreset != null }
+        if (FilterMath.colorMatrix(project.filter) == null && !hasTimedFilter) return emptyList()
+        return listOf(
+            RgbMatrix { presentationTimeUs, _ ->
+                buildGlColorMatrix(project.filterAt(clock.sourceMs(presentationTimeUs)))
+            },
         )
-        if (sepia > 0f) {
-            val inv = 1f - sepia
-            cm.postConcat(
-                android.graphics.ColorMatrix(
-                    floatArrayOf(
-                        inv + 0.393f * sepia, 0.769f * sepia, 0.189f * sepia, 0f, 0f,
-                        0.349f * sepia, inv + 0.686f * sepia, 0.168f * sepia, 0f, 0f,
-                        0.272f * sepia, 0.534f * sepia, inv + 0.131f * sepia, 0f, 0f,
-                        0f, 0f, 0f, 1f, 0f,
-                    ),
-                ),
-            )
-        }
-        // android ColorMatrix (4x5, zeilenweise) -> Media3 RgbMatrix (4x4, spaltenweise)
-        val a = cm.array
+    }
+
+    private fun buildGlColorMatrix(config: FilterConfig): FloatArray {
+        val m = FilterMath.colorMatrix(config) ?: return floatArrayOf(
+            1f, 0f, 0f, 0f,
+            0f, 1f, 0f, 0f,
+            0f, 0f, 1f, 0f,
+            0f, 0f, 0f, 1f,
+        )
+        // FilterMath yields a 4x5 row-major matrix with translation in col 4 (0..255); convert to 4x4 column-major GL matrix
         val gl = FloatArray(16)
-        for (row in 0 until 4) {
-            for (col in 0 until 4) {
-                gl[col * 4 + row] = a[row * 5 + col]
+        for (row in 0 until 3) {
+            for (col in 0 until 3) {
+                gl[col * 4 + row] = m[row * 5 + col]
             }
+            gl[3 * 4 + row] = m[row * 5 + 4] / 255f
         }
-        effects.add(RgbMatrix { _, _ -> gl })
-        if (kotlin.math.abs(contrast - 1f) > 0.01f) {
-            effects.add(Contrast(((contrast - 1f) / (contrast + 1f)).coerceIn(-1f, 1f)))
-        }
-        if (kotlin.math.abs(brightness) > 0.005f) {
-            effects.add(Brightness(brightness))
-        }
-        return effects
+        gl[15] = 1f
+        return gl
     }
 
     /** Pixel pro dp, damit Texte/Emojis im Video so groß wirken wie in der Vorschau (~391x421 dp Bühne). */
@@ -383,14 +364,24 @@ internal class ExportOverlayRenderer(
     fun render(sourceMs: Long): Bitmap {
         val t = project.transformAt(sourceMs)
         val activeBlur = project.blurAt(sourceMs)
+        val activeFilter = project.filterAt(sourceMs)
+        val activeFade = project.videoFadeAt(sourceMs)
         val hasCrop = t.cropLeft > 0.005f || t.cropTop > 0.005f || t.cropRight < 0.995f || t.cropBottom < 0.995f
-        val overlays = project.overlays.filter { sourceMs in it.startMs..it.endMs }
-        val sub = project.subtitles.firstOrNull { sourceMs in it.startMs..it.endMs }
+        val overlays = project.overlays.filter { it.isVisibleAt(sourceMs, project.trimEndMs) }
+        val sub = project.subtitleAt(sourceMs)
         val overlayKey = overlays.joinToString(",") { ov ->
-            "${ov.id}:${(ov.rotationZAt(sourceMs) * 10).roundToInt()}:${(ov.rotationXAt(sourceMs) * 10).roundToInt()}:${(ov.rotationYAt(sourceMs) * 10).roundToInt()}"
+            "${ov.id}:${(ov.xAt(sourceMs) * 100).roundToInt()}:${(ov.yAt(sourceMs) * 100).roundToInt()}:" +
+                "${(ov.scaleAt(sourceMs) * 100).roundToInt()}:${(ov.alphaAt(sourceMs) * 100).roundToInt()}:" +
+                "${ov.visibleContentAt(sourceMs).length}:" +
+                "${(ov.rotationZAt(sourceMs) * 10).roundToInt()}:${(ov.rotationXAt(sourceMs) * 10).roundToInt()}:${(ov.rotationYAt(sourceMs) * 10).roundToInt()}"
         }
-        // Transform-Hash nur in den Cache-Schlüssel aufnehmen, wenn tatsächlich Kanten zugeschnitten sind
-        val key = "${if (hasCrop) t.hashCode() else 0}|${activeBlur.hashCode()}|$overlayKey|${sub?.id}"
+        val subKey = sub?.let { s ->
+            "${s.id}:${if (s.karaoke) s.activeWordIndexAt(sourceMs) else -1}:" +
+                "${s.visibleTextAt(sourceMs).length}:${(s.alphaAt(sourceMs) * 100).roundToInt()}:${(s.scaleAt(sourceMs) * 100).roundToInt()}"
+        }
+        val fadeKey = activeFade?.let { "${it.first}:${(it.second * 100).roundToInt()}" }
+        val vigKey = "${activeFilter.preset.id}:${(activeFilter.vignetteStrength * 100).roundToInt()}"
+        val key = "${if (hasCrop) t.hashCode() else 0}|${activeBlur.hashCode()}|$vigKey|$fadeKey|$overlayKey|$subKey"
         if (key == lastKey) return buffers[current]
 
         current = 1 - current
@@ -399,12 +390,37 @@ internal class ExportOverlayRenderer(
         val canvas = Canvas(bmp)
 
         drawCropMask(canvas, t)
-        drawZoneBlur(canvas, sourceMs)
+        drawVignette(canvas, activeFilter)
+        drawZoneBlur(canvas, activeBlur)
+        drawVideoFade(canvas, activeFade)
         for (ov in overlays) drawOverlay(canvas, ov, sourceMs)
-        if (sub != null) drawSubtitle(canvas, sub)
+        if (sub != null) drawSubtitle(canvas, sub, sourceMs)
 
         lastKey = key
         return bmp
+    }
+
+    private fun drawVignette(canvas: Canvas, filterConfig: FilterConfig) {
+        if (filterConfig.vignetteStrength <= 0.02f) return
+        if (filterConfig.preset == VideoFilterPreset.NONE && kotlin.math.abs(filterConfig.vignetteStrength - 0.15f) <= 0.01f) return
+        val edgeAlpha = ((filterConfig.vignetteStrength * 0.75f).coerceIn(0f, 0.85f) * 255).roundToInt()
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = RadialGradient(
+                w / 2f, h / 2f, maxOf(w, h) * 0.62f,
+                Color.TRANSPARENT,
+                Color.argb(edgeAlpha, 0, 0, 0),
+                Shader.TileMode.CLAMP,
+            )
+        }
+        canvas.drawRect(0f, 0f, w, h, paint)
+    }
+
+    private fun drawVideoFade(canvas: Canvas, fade: Pair<Long, Float>?) {
+        if (fade == null) return
+        val (colorArgb, alpha) = fade
+        val aInt = (alpha * 255f).roundToInt().coerceIn(0, 255)
+        val rgb = colorArgb.toInt() and 0x00FFFFFF
+        canvas.drawColor((aInt shl 24) or rgb)
     }
 
     /** Wie die Vorschau: deckend schwarze Maske liegt im transformierten Layer und deckt auch Zoom/Pan/Drehung ab. */
@@ -435,11 +451,17 @@ internal class ExportOverlayRenderer(
         // Bereiche, die durch die Verschiebung frei werden, bleiben (wie in der Vorschau) schwarz
     }
 
-    private fun drawZoneBlur(canvas: Canvas, sourceMs: Long) {
-        val blur = project.blurAt(sourceMs)
-        if (blur.mode == BlurMode.OFF || blur.mode == BlurMode.FULL_FRAME || blur.radiusPx <= 0.5f) return
+    private fun drawZoneBlur(canvas: Canvas, blur: com.example.pocketcraft.model.BlurConfig) {
+        if (blur.mode == BlurMode.OFF || blur.radiusPx <= 0.5f) return
         val alpha = (blur.radiusPx / 45f).coerceIn(0.15f, 0.85f)
         when (blur.mode) {
+            BlurMode.FULL_FRAME -> {
+                // Timed full-frame blur when global GaussianBlur was not attached
+                if (project.blur.mode != BlurMode.FULL_FRAME) {
+                    val paint = Paint().apply { color = Color.argb((alpha * 165).roundToInt(), 15, 23, 42) }
+                    canvas.drawRect(0f, 0f, w, h, paint)
+                }
+            }
             BlurMode.PRIVACY_ZONE -> {
                 val bw = (w * blur.zoneWidth).coerceAtLeast(48f)
                 val bh = (h * blur.zoneHeight).coerceAtLeast(36f)
@@ -470,6 +492,10 @@ internal class ExportOverlayRenderer(
 
     private fun drawOverlay(canvas: Canvas, ov: com.example.pocketcraft.model.CanvasOverlay, sourceMs: Long) {
         val isText = ov.kind == OverlayKind.TEXT
+        val curScale = ov.scaleAt(sourceMs)
+        val curAlpha = ov.alphaAt(sourceMs)
+        if (curAlpha <= 0.01f) return
+        val visibleText = ov.visibleContentAt(sourceMs)
         val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
         if (isText) {
             textPaint.typeface = FontRegistry.resolveAndroidTypeface(ov.fontId, project.customFonts)
@@ -484,8 +510,8 @@ internal class ExportOverlayRenderer(
         val innerY = if (isText) 5 * dp else 0f
 
         // Wie die Vorschau: lange Texte brechen um, damit die Box (samt Skalierung) ins Bild passt
-        val maxTextW = (ExportLayout.overlayMaxBoxWidth(w, ov.scale) - 2 * (pad + innerX)).roundToInt().coerceAtLeast(10)
-        val layout = StaticLayout.Builder.obtain(ov.content, 0, ov.content.length, textPaint, maxTextW)
+        val maxTextW = (ExportLayout.overlayMaxBoxWidth(w, curScale) - 2 * (pad + innerX)).roundToInt().coerceAtLeast(10)
+        val layout = StaticLayout.Builder.obtain(visibleText, 0, visibleText.length, textPaint, maxTextW)
             .setAlignment(Layout.Alignment.ALIGN_CENTER)
             .setIncludePad(false)
             .build()
@@ -495,15 +521,19 @@ internal class ExportOverlayRenderer(
         val boxH = layout.height + 2 * (pad + innerY)
 
         // Vorschau: die Box sitzt mit ihrer Mitte auf (x, y) und wird um diese Mitte skaliert/gedreht
-        val cx = ov.xPercent * w
-        val cy = ov.yPercent * h
+        val cx = ov.xAt(sourceMs) * w
+        val cy = ov.yAt(sourceMs) * h
         val left = cx - boxW / 2f
         val top = cy - boxH / 2f
-        canvas.save()
+        val saveCount = if (curAlpha < 0.99f) {
+            canvas.saveLayerAlpha(0f, 0f, w, h, (curAlpha * 255f).roundToInt().coerceIn(0, 255))
+        } else {
+            canvas.save()
+        }
         canvas.rotate(ov.rotationZAt(sourceMs), cx, cy)
         canvas.scale(
-            ov.scale * VideoExporter.axisScale(ov.rotationYAt(sourceMs)),
-            ov.scale * VideoExporter.axisScale(ov.rotationXAt(sourceMs)),
+            curScale * VideoExporter.axisScale(ov.rotationYAt(sourceMs)),
+            curScale * VideoExporter.axisScale(ov.rotationXAt(sourceMs)),
             cx,
             cy,
         )
@@ -513,18 +543,43 @@ internal class ExportOverlayRenderer(
         }
         canvas.translate(left + pad + innerX - (maxTextW - lineW) / 2f, top + pad + innerY)
         layout.draw(canvas)
-        canvas.restore()
+        canvas.restoreToCount(saveCount)
     }
 
-    private fun drawSubtitle(canvas: Canvas, sub: com.example.pocketcraft.model.SubtitleSegment) {
+    private fun drawSubtitle(canvas: Canvas, sub: com.example.pocketcraft.model.SubtitleSegment, sourceMs: Long) {
+        val curAlpha = sub.alphaAt(sourceMs)
+        if (curAlpha <= 0.01f) return
+        val curScale = sub.scaleAt(sourceMs)
+        val visibleText = sub.visibleTextAt(sourceMs)
         val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = FontRegistry.resolveAndroidTypeface(sub.fontId, project.customFonts)
             isFakeBoldText = true
             textSize = sub.fontSizeSp * dp
             color = sub.textColorArgb.toInt()
         }
+        val renderedText: CharSequence = if (sub.karaoke) {
+            val words = visibleText.split(Regex("\\s+")).filter { it.isNotEmpty() }
+            val activeIdx = sub.activeWordIndexAt(sourceMs)
+            val joined = words.joinToString(" ")
+            val spannable = SpannableString(joined)
+            var cursor = 0
+            words.forEachIndexed { idx, word ->
+                if (idx == activeIdx) {
+                    spannable.setSpan(
+                        ForegroundColorSpan(sub.highlightColorArgb.toInt()),
+                        cursor,
+                        cursor + word.length,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                }
+                cursor += word.length + 1
+            }
+            spannable
+        } else {
+            visibleText
+        }
         val maxTextW = (w - 2 * 12 * dp - 2 * 12 * dp).roundToInt().coerceAtLeast(10)
-        val layout = StaticLayout.Builder.obtain(sub.text, 0, sub.text.length, textPaint, maxTextW)
+        val layout = StaticLayout.Builder.obtain(renderedText, 0, renderedText.length, textPaint, maxTextW)
             .setAlignment(Layout.Alignment.ALIGN_CENTER)
             .build()
         var lineW = 0f
@@ -537,6 +592,14 @@ internal class ExportOverlayRenderer(
         } else {
             h - 18 * dp - boxH
         }
+        val saveCount = if (curAlpha < 0.99f) {
+            canvas.saveLayerAlpha(0f, 0f, w, h, (curAlpha * 255f).roundToInt().coerceIn(0, 255))
+        } else {
+            canvas.save()
+        }
+        if (kotlin.math.abs(curScale - 1f) > 0.005f) {
+            canvas.scale(curScale, curScale, left + boxW / 2f, top + boxH / 2f)
+        }
         val rect = RectF(left, top, left + boxW, top + boxH)
         canvas.drawRoundRect(rect, 10 * dp, 10 * dp, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = sub.backgroundColorArgb.toInt() })
         canvas.drawRoundRect(
@@ -547,9 +610,61 @@ internal class ExportOverlayRenderer(
                 color = Color.argb(46, 255, 255, 255)
             },
         )
-        canvas.save()
         canvas.translate(left + 12 * dp - (maxTextW - lineW) / 2f, top + 6 * dp)
         layout.draw(canvas)
-        canvas.restore()
+        canvas.restoreToCount(saveCount)
+    }
+}
+
+/**
+ * Applies global and timed audio gain (`mute`, `volume`, `audio fade in/out`) to 16-bit PCM frames
+ * during Media3 export.
+ */
+@OptIn(UnstableApi::class)
+internal class VolumeFadeAudioProcessor(
+    private val project: VideoProject,
+    private val segmentStartMs: Long,
+) : BaseAudioProcessor() {
+
+    private var processedFrames: Long = 0L
+
+    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
+            return AudioProcessor.AudioFormat.NOT_SET
+        }
+        return inputAudioFormat
+    }
+
+    override fun queueInput(inputBuffer: ByteBuffer) {
+        val bytesPerFrame = inputAudioFormat.bytesPerFrame.coerceAtLeast(2)
+        val channels = inputAudioFormat.channelCount.coerceAtLeast(1)
+        val sampleRate = inputAudioFormat.sampleRate.coerceAtLeast(1)
+        val frameCount = inputBuffer.remaining() / bytesPerFrame
+        if (frameCount <= 0) return
+
+        val out = replaceOutputBuffer(frameCount * bytesPerFrame)
+        for (f in 0 until frameCount) {
+            val sourceMs = segmentStartMs + ((processedFrames + f) * 1000L) / sampleRate
+            val gain = project.audioGainAt(sourceMs)
+            for (ch in 0 until channels) {
+                val sample = inputBuffer.short.toInt()
+                val scaled = if (kotlin.math.abs(gain - 1f) < 0.01f) {
+                    sample
+                } else {
+                    (sample * gain).roundToInt().coerceIn(-32768, 32767)
+                }
+                out.putShort(scaled.toShort())
+            }
+        }
+        processedFrames += frameCount
+        out.flip()
+    }
+
+    override fun onFlush() {
+        processedFrames = 0L
+    }
+
+    override fun onReset() {
+        processedFrames = 0L
     }
 }

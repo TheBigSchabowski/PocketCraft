@@ -2,12 +2,15 @@ package com.example.pocketcraft.desktop
 
 import com.example.pocketcraft.engine.ExportLayout
 import com.example.pocketcraft.engine.FilterMath
+import com.example.pocketcraft.model.BlurConfig
 import com.example.pocketcraft.model.BlurMode
 import com.example.pocketcraft.model.BuiltInFont
 import com.example.pocketcraft.model.CanvasOverlay
 import com.example.pocketcraft.model.CropZoomState
+import com.example.pocketcraft.model.FilterConfig
 import com.example.pocketcraft.model.OverlayKind
 import com.example.pocketcraft.model.SubtitleSegment
+import com.example.pocketcraft.model.VideoFilterPreset
 import com.example.pocketcraft.model.VideoProject
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
@@ -70,15 +73,33 @@ class DesktopFrameRenderer(
         setAssetFontManager(provider)
     }
 
-    private val videoPaint = Paint().apply {
-        FilterMath.colorMatrix(project.filter)?.let { matrix ->
-            val m = matrix.copyOf()
-            for (i in intArrayOf(4, 9, 14, 19)) m[i] = m[i] / 255f // Skia: Offsets im Bereich 0–1
-            colorFilter = ColorFilter.makeMatrix(ColorMatrix(m))
+    private var cachedFilter: FilterConfig? = null
+    private var cachedBlur: BlurConfig? = null
+    private var activeColorFilter: ColorFilter? = null
+    private var activeImageFilter: ImageFilter? = null
+    private val videoPaint = Paint()
+
+    private fun updateVideoPaint(filterConfig: FilterConfig, blurConfig: BlurConfig) {
+        if (filterConfig != cachedFilter) {
+            cachedFilter = filterConfig
+            activeColorFilter?.close()
+            activeColorFilter = FilterMath.colorMatrix(filterConfig)?.let { matrix ->
+                val m = matrix.copyOf()
+                for (i in intArrayOf(4, 9, 14, 19)) m[i] = m[i] / 255f // Skia: Offsets im Bereich 0–1
+                ColorFilter.makeMatrix(ColorMatrix(m))
+            }
+            videoPaint.colorFilter = activeColorFilter
         }
-        if (project.blur.mode == BlurMode.FULL_FRAME && project.blur.radiusPx > 0.5f) {
-            val sigma = (project.blur.radiusPx * 0.65f * dp / 2f).coerceIn(1f, 60f)
-            imageFilter = ImageFilter.makeBlur(sigma, sigma, FilterTileMode.CLAMP)
+        if (blurConfig != cachedBlur) {
+            cachedBlur = blurConfig
+            activeImageFilter?.close()
+            activeImageFilter = if (blurConfig.mode == BlurMode.FULL_FRAME && blurConfig.radiusPx > 0.5f) {
+                val sigma = (blurConfig.radiusPx * 0.65f * dp / 2f).coerceIn(1f, 60f)
+                ImageFilter.makeBlur(sigma, sigma, FilterTileMode.CLAMP)
+            } else {
+                null
+            }
+            videoPaint.imageFilter = activeImageFilter
         }
     }
 
@@ -94,6 +115,9 @@ class DesktopFrameRenderer(
     /** Rendert das Bild für Quellzeit [sourceMs] und gibt die BGRA-Pixel (Zeilenlänge = Breite × 4) zurück. */
     fun render(source: Image, sourceMs: Long): ByteArray {
         val t = project.transformAt(sourceMs)
+        val activeFilter = project.filterAt(sourceMs)
+        val activeBlur = project.blurAt(sourceMs)
+        updateVideoPaint(activeFilter, activeBlur)
         canvas.clear(0xFF000000.toInt())
 
         // Wie die Vorschau: Video und Zuschnitt-Maske liegen gemeinsam im verschobenen/gezoomten/gedrehten Layer
@@ -104,16 +128,41 @@ class DesktopFrameRenderer(
         val sy = t.zoom * axisScale(t.rotationXDegrees)
         canvas.scale(sx, sy, w / 2f, h / 2f)
         drawVideo(source)
+        drawVignette(activeFilter)
         drawCropMask(t)
         canvas.restore()
 
-        drawZoneBlur(sourceMs)
+        drawZoneBlur(activeBlur)
+        drawVideoFade(sourceMs)
         for (overlay in project.overlays) {
-            if (sourceMs in overlay.startMs..overlay.endMs) drawOverlay(overlay, sourceMs)
+            if (overlay.isVisibleAt(sourceMs, project.trimEndMs)) drawOverlay(overlay, sourceMs)
         }
-        project.subtitles.firstOrNull { sourceMs in it.startMs..it.endMs }?.let { drawSubtitle(it) }
+        project.subtitleAt(sourceMs)?.let { drawSubtitle(it, sourceMs) }
 
         return bitmap.readPixels(info, size.width * 4, 0, 0) ?: ByteArray(size.width * size.height * 4)
+    }
+
+    private fun drawVignette(filterConfig: FilterConfig) {
+        if (filterConfig.vignetteStrength <= 0.02f) return
+        if (filterConfig.preset == VideoFilterPreset.NONE && kotlin.math.abs(filterConfig.vignetteStrength - 0.15f) <= 0.01f) return
+        val edgeAlpha = (filterConfig.vignetteStrength * 0.75f).coerceIn(0f, 0.85f)
+        Paint().use { paint ->
+            paint.shader = Shader.makeRadialGradient(
+                w / 2f, h / 2f, maxOf(w, h) * 0.62f,
+                intArrayOf(0, argb((edgeAlpha * 255).roundToInt(), 0, 0, 0)),
+            )
+            canvas.drawRect(Rect.makeWH(w, h), paint)
+        }
+    }
+
+    private fun drawVideoFade(sourceMs: Long) {
+        val fade = project.videoFadeAt(sourceMs) ?: return
+        val (colorArgb, alpha) = fade
+        val aInt = (alpha * 255f).roundToInt().coerceIn(0, 255)
+        val rgb = colorArgb.toInt() and 0x00FFFFFF
+        Paint().apply { color = (aInt shl 24) or rgb }.use { paint ->
+            canvas.drawRect(Rect.makeWH(w, h), paint)
+        }
     }
 
     private fun Canvas.scale(sx: Float, sy: Float, px: Float, py: Float) {
@@ -166,8 +215,7 @@ class DesktopFrameRenderer(
         }
     }
 
-    private fun drawZoneBlur(sourceMs: Long) {
-        val blur = project.blurAt(sourceMs)
+    private fun drawZoneBlur(blur: BlurConfig) {
         if (blur.mode == BlurMode.OFF || blur.mode == BlurMode.FULL_FRAME || blur.radiusPx <= 0.5f) return
         val alpha = (blur.radiusPx / 45f).coerceIn(0.15f, 0.85f)
         when (blur.mode) {
@@ -206,27 +254,37 @@ class DesktopFrameRenderer(
         val isText = ov.kind == OverlayKind.TEXT
         val innerX = if (isText) 10 * dp else 0f
         val innerY = if (isText) 5 * dp else 0f
+        val curScale = ov.scaleAt(sourceMs)
+        val curAlpha = ov.alphaAt(sourceMs)
+        if (curAlpha <= 0.01f) return
+        val visibleText = ov.visibleContentAt(sourceMs)
         // Wie die Vorschau: lange Texte brechen um, damit die Box (samt Skalierung) ins Bild passt
-        val maxTextW = (ExportLayout.overlayMaxBoxWidth(w, ov.scale) - 2 * (pad + innerX)).coerceAtLeast(10f)
+        val maxTextW = (ExportLayout.overlayMaxBoxWidth(w, curScale) - 2 * (pad + innerX)).coerceAtLeast(10f)
         val paragraph = if (isText) {
-            paragraph(ov.content, ov.fontId, 16 * dp, ov.colorArgb, bold = true, maxWidth = maxTextW, centered = true)
+            paragraph(visibleText, ov.fontId, 16 * dp, ov.colorArgb, bold = true, maxWidth = maxTextW, centered = true)
         } else {
-            paragraph(ov.content, null, 36 * dp, 0xFFFFFFFF, bold = false, maxWidth = maxTextW, centered = true)
+            paragraph(visibleText, null, 36 * dp, 0xFFFFFFFF, bold = false, maxWidth = maxTextW, centered = true)
         }
         paragraph.use { p ->
             val lineW = p.longestLine
             val boxW = lineW + 2 * (pad + innerX)
             val boxH = p.height + 2 * (pad + innerY)
             // Vorschau: die Box sitzt mit ihrer Mitte auf (x, y) und wird um diese Mitte skaliert/gedreht
-            val cx = ov.xPercent * w
-            val cy = ov.yPercent * h
+            val cx = ov.xAt(sourceMs) * w
+            val cy = ov.yAt(sourceMs) * h
             val left = cx - boxW / 2f
             val top = cy - boxH / 2f
-            canvas.save()
+            if (curAlpha < 0.99f) {
+                Paint().apply { alpha = (curAlpha * 255f).roundToInt().coerceIn(0, 255) }.use { lp ->
+                    canvas.saveLayer(null, lp)
+                }
+            } else {
+                canvas.save()
+            }
             canvas.rotate(ov.rotationZAt(sourceMs), cx, cy)
             canvas.scale(
-                ov.scale * axisScale(ov.rotationYAt(sourceMs)),
-                ov.scale * axisScale(ov.rotationXAt(sourceMs)),
+                curScale * axisScale(ov.rotationYAt(sourceMs)),
+                curScale * axisScale(ov.rotationXAt(sourceMs)),
                 cx,
                 cy,
             )
@@ -240,9 +298,19 @@ class DesktopFrameRenderer(
         }
     }
 
-    private fun drawSubtitle(sub: SubtitleSegment) {
+    private fun drawSubtitle(sub: SubtitleSegment, sourceMs: Long) {
+        val curAlpha = sub.alphaAt(sourceMs)
+        if (curAlpha <= 0.01f) return
+        val curScale = sub.scaleAt(sourceMs)
+        val visibleText = sub.visibleTextAt(sourceMs)
+        val activeWordIdx = if (sub.karaoke) sub.activeWordIndexAt(sourceMs) else -1
         val maxTextW = (w - 48 * dp).coerceAtLeast(10f)
-        paragraph(sub.text, sub.fontId, sub.fontSizeSp * dp, sub.textColorArgb, bold = true, maxWidth = maxTextW, centered = true).use { p ->
+        val builtParagraph = if (sub.karaoke) {
+            karaokeParagraph(visibleText, sub.fontId, sub.fontSizeSp * dp, sub.textColorArgb, sub.highlightColorArgb, activeWordIdx, maxTextW)
+        } else {
+            paragraph(visibleText, sub.fontId, sub.fontSizeSp * dp, sub.textColorArgb, bold = true, maxWidth = maxTextW, centered = true)
+        }
+        builtParagraph.use { p ->
             val lineW = p.longestLine
             val boxW = lineW + 24 * dp
             val boxH = p.height + 12 * dp
@@ -252,6 +320,16 @@ class DesktopFrameRenderer(
             } else {
                 h - 18 * dp - boxH
             }
+            if (curAlpha < 0.99f) {
+                Paint().apply { alpha = (curAlpha * 255f).roundToInt().coerceIn(0, 255) }.use { lp ->
+                    canvas.saveLayer(null, lp)
+                }
+            } else {
+                canvas.save()
+            }
+            if (kotlin.math.abs(curScale - 1f) > 0.005f) {
+                canvas.scale(curScale, curScale, left + boxW / 2f, top + boxH / 2f)
+            }
             val box = RRect.makeXYWH(left, top, boxW, boxH, 10 * dp)
             Paint().apply { color = sub.backgroundColorArgb.toInt() }.use { canvas.drawRRect(box, it) }
             Paint().apply {
@@ -260,7 +338,33 @@ class DesktopFrameRenderer(
                 color = argb(46, 255, 255, 255)
             }.use { canvas.drawRRect(box, it) }
             p.paint(canvas, left + 12 * dp - (maxTextW - lineW) / 2f, top + 6 * dp)
+            canvas.restore()
         }
+    }
+
+    private fun karaokeParagraph(
+        text: String,
+        fontId: String,
+        sizePx: Float,
+        baseColorArgb: Long,
+        highlightColorArgb: Long,
+        activeWordIdx: Int,
+        maxWidth: Float,
+    ): Paragraph {
+        val italic = fontId == BuiltInFont.SERIF_CINEMA.id
+        val fontStyle = if (italic) FontStyle.BOLD_ITALIC else FontStyle.BOLD
+        val families = DesktopFonts.families(fontId, customFamilies)
+        val baseStyle = TextStyle().setColor(baseColorArgb.toInt()).setFontSize(sizePx).setFontFamilies(families).setFontStyle(fontStyle)
+        val hlStyle = TextStyle().setColor(highlightColorArgb.toInt()).setFontSize(sizePx).setFontFamilies(families).setFontStyle(fontStyle)
+        val builder = ParagraphBuilder(ParagraphStyle().apply { alignment = Alignment.CENTER }, fonts)
+        val words = text.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        words.forEachIndexed { idx, word ->
+            if (idx > 0) {
+                builder.pushStyle(baseStyle).addText(" ").popStyle()
+            }
+            builder.pushStyle(if (idx == activeWordIdx) hlStyle else baseStyle).addText(word).popStyle()
+        }
+        return builder.build().layout(maxWidth)
     }
 
     private fun paragraph(
@@ -293,6 +397,8 @@ class DesktopFrameRenderer(
     private fun argb(a: Int, r: Int, g: Int, b: Int): Int = (a shl 24) or (r shl 16) or (g shl 8) or b
 
     override fun close() {
+        activeColorFilter?.close()
+        activeImageFilter?.close()
         videoPaint.close()
         canvas.close()
         bitmap.close()

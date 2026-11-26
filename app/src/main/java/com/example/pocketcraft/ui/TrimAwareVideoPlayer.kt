@@ -57,6 +57,7 @@ private class PreviewPlayerController(
     private var videoWidth = 0
     private var videoHeight = 0
     private var currentSpeed = 1.0f
+    private var currentVolume = 1.0f
 
     fun attach(view: TextureView) {
         textureView = view
@@ -154,6 +155,17 @@ private class PreviewPlayerController(
         }
     }
 
+    override fun applyVolume(gain: Float) {
+        val mp = player ?: return
+        val g = gain.coerceIn(0f, 1f)
+        if (!isPrepared || abs(g - currentVolume) < 0.01f) return
+        try {
+            mp.setVolume(g, g)
+            currentVolume = g
+        } catch (_: Exception) {
+        }
+    }
+
     override fun pause() {
         try {
             if (player?.isPlaying == true) player?.pause()
@@ -171,6 +183,7 @@ private class PreviewPlayerController(
     fun releasePlayer() {
         isPrepared = false
         currentSpeed = 1.0f
+        currentVolume = 1.0f
         try {
             player?.release()
         } catch (_: Exception) {
@@ -207,7 +220,8 @@ fun TrimAwareVideoPlayer(
         onDispose { controller.releasePlayer() }
     }
 
-    val filterMatrix = remember(engine.project.filter) { FilterMath.colorMatrix(engine.project.filter) }
+    val activeFilter = engine.currentFilter(engine.playheadMs)
+    val filterMatrix = remember(activeFilter) { FilterMath.colorMatrix(activeFilter) }
 
     AndroidView(
         factory = { ctx -> TextureView(ctx).also { controller.attach(it) } },

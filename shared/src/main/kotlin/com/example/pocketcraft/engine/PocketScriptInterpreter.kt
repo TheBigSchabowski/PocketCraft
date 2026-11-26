@@ -2,8 +2,14 @@ package com.example.pocketcraft.engine
 
 import com.example.pocketcraft.model.OverlayKind
 
+/** Output line produced by a PocketScript execution for display in the code-editor output strip. */
+data class ScriptOutputLine(
+    val text: String,
+    val isError: Boolean = false,
+)
+
 /**
- * Variablen und selbst definierte Funktionen eines PocketScript-Laufs.
+ * Variablen, Styles und selbst definierte Funktionen eines PocketScript-Laufs.
  * Gehört zur [ProjectEngine] und bleibt zwischen einzelnen Befehlen erhalten, sodass man in der
  * Befehlszeile erst `let x = 3` und danach `zoom $x` tippen kann.
  */
@@ -20,17 +26,33 @@ class ScriptEnvironment {
     /** Globale Funktionen (`global def name(a): …`) – gelten in allen Projekten. */
     val globalFunctions = linkedMapOf<String, ScriptFunction>()
 
+    /** Project-scoped reusable dot-modifier styles (`style hook = .gold.big.pop`). */
+    val styles = linkedMapOf<String, String>()
+
+    /** Global reusable dot-modifier styles (`global style hook = .gold.big.pop`). */
+    val globalStyles = linkedMapOf<String, String>()
+
     /** Funktion mit diesem Namen: die des Projekts hat Vorrang vor einer globalen. */
     fun function(name: String): ScriptFunction? = name.lowercase().let { functions[it] ?: globalFunctions[it] }
 
+    /** Looks up a reusable style by name (project style overrides global style). */
+    fun style(name: String): String? = name.lowercase().let { styles[it] ?: globalStyles[it] }
+
     companion object {
-        /** Gespeicherter Text zurück in einen Wert: Zahlen werden wieder Zahlen. */
-        fun decode(text: String): Any = ScriptExpression.parseNumber(text) ?: text
+        /** Gespeicherter Text zurück in einen Wert: Listen und Zahlen werden wieder typisiert. */
+        fun decode(text: String): Any {
+            val trimmed = text.trim()
+            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                ScriptExpression.parseListLiteral(trimmed)?.let { return it }
+            }
+            return ScriptExpression.parseNumber(trimmed) ?: text
+        }
     }
 
     fun clear() {
         variables.clear()
         functions.clear()
+        styles.clear()
     }
 }
 
@@ -45,36 +67,31 @@ class ScriptFunction(
 )
 
 /**
- * Programmier-Konstrukte für **PocketScript** – alles, was über einen einzelnen Schnittbefehl hinausgeht:
+ * Programmier-Konstrukte für **PocketScript 3.0** – alles, was über einen einzelnen Schnittbefehl hinausgeht:
  *
  * ```
  * let abstand = 4                      # Variable dieses Projekts (wird mit ihm gespeichert)
- * global favoriten = [🚀, ⭐, 🎉]           # globale Variable: gilt in allen Projekten
+ * global favoriten = [🚀, ⭐, 🎉]       # globale Variable: gilt in allen Projekten
+ * style hook = .gold.big.impact.pop    # wiederverwendbarer Text-/Emoji-Stil
  * for t in 0..12 step $abstand         # Zählschleife (Block bis `end`)
  *   $t-{$t + 2} set emoji: 🔥          # $name und {Rechnung} werden in Befehle eingesetzt
  * end
  * if $duration > 30: delete after 00:30   # Bedingung mit Vergleich (einzeilig)
- * if $captions == 0                    # … oder als Block mit else
- *   autocaption
- * else
- *   print Es gibt $captions Untertitel
- * end
- * def titel(text, farbe)               # eigene Funktion (global def …: in allen Projekten)
+ * def titel(text, farbe)               # eigene Funktion (mit `return` auch für Rückgabewerte)
  *   0-3 set text: $text.$farbe.big.top
  * end
- * titel(Mein Urlaub, gold)
- * for c in captions: $c_start-$c_end u15%   # über alle Untertitel laufen
- * repeat 3: rotate 90
  * ```
- *
- * Normale Zeilen (alles andere) gehen nach dem Einsetzen der Variablen unverändert an die
- * bestehenden Befehle (`zoom 2`, `all u20%`, `8-10 set caption: …`, `if caption red: …`).
  */
 object PocketScriptInterpreter {
 
     private const val MAX_LOOP_ITERATIONS = 500
     private const val MAX_STEPS = 5_000
     private const val MAX_CALL_DEPTH = 30
+
+    // Internal control-flow signals (never escape top-level execution uncaught)
+    private class BreakSignal(val line: Int) : RuntimeException(null, null, false, false)
+    private class ContinueSignal(val line: Int) : RuntimeException(null, null, false, false)
+    private class ReturnSignal(val value: Any?) : RuntimeException(null, null, false, false)
 
     // ---------------------------------------------------------------- Programmstruktur
 
@@ -92,6 +109,7 @@ object PocketScriptInterpreter {
             /** `global x = 1`: gilt in allen Projekten. */
             val global: Boolean = false,
         ) : Stmt()
+        data class Style(override val line: Int, val name: String, val value: String, val global: Boolean = false) : Stmt()
         data class Print(override val line: Int, val text: String) : Stmt()
         data class If(override val line: Int, val branches: List<Branch>, val elseBody: List<Stmt>?) : Stmt()
         data class While(override val line: Int, val keyword: String, val condition: String, val body: List<Stmt>) : Stmt()
@@ -99,18 +117,27 @@ object PocketScriptInterpreter {
         data class Repeat(override val line: Int, val count: String, val body: List<Stmt>) : Stmt()
         data class Def(override val line: Int, val function: ScriptFunction, val global: Boolean = false) : Stmt()
         data class Call(override val line: Int, val name: String, val args: String) : Stmt()
+        data class Return(override val line: Int, val valueText: String) : Stmt()
+        data class Break(override val line: Int) : Stmt()
+        data class Continue(override val line: Int) : Stmt()
         data class Vars(override val line: Int, val clear: Boolean = false, val globals: Boolean = false) : Stmt()
         data class Unset(override val line: Int, val name: String, val global: Boolean = false) : Stmt()
     }
 
     data class Branch(val keyword: String, val condition: String, val body: List<Stmt>)
+    private data class SourceLine(val lineNumber: Int, val text: String)
 
     private const val NAME = """[\p{L}_][\p{L}\p{N}_]*"""
     private val assignRegex = Regex(
         """^(?:(?:let|var|sei)\s+)?(?:(global)\s+)?(?:(?:let|var|sei)\s+)?\$?($NAME)\s*([+\-*/]?)=(?!=)\s*(.*)$""",
         RegexOption.IGNORE_CASE,
     )
+    private val styleRegex = Regex(
+        """^(?:(global)\s+)?style\s+($NAME)\s*=\s*(.+)$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val printRegex = Regex("""^(?:print|echo|sag|zeige)(?:\s+(.*))?$""", RegexOption.IGNORE_CASE)
+    private val returnRegex = Regex("""^return(?:\s+(.*))?$""", RegexOption.IGNORE_CASE)
     private val ifRegex = Regex("""^(if|wenn|elif|else\s+if|sonst\s+wenn)\s+(.+)$""", RegexOption.IGNORE_CASE)
     private val whileRegex = Regex("""^(while|solange)\s+(.+)$""", RegexOption.IGNORE_CASE)
     private val forRegex = Regex("""^(?:for|für|fuer)\s+\$?($NAME)\s+in\s+(.+)$""", RegexOption.IGNORE_CASE)
@@ -132,7 +159,7 @@ object PocketScriptInterpreter {
     /** Sprach-Schlüsselwörter: nie als Variablen-, Parameter- oder Funktionsname erlaubt. */
     private val keywordNames = setOf(
         "if", "wenn", "elif", "while", "solange", "for", "repeat", "def", "end", "ende", "else", "sonst", "let", "var", "global",
-        "print", "true", "false", "and", "or", "not", "und", "oder", "nicht", "in", "step",
+        "print", "true", "false", "and", "or", "not", "und", "oder", "nicht", "in", "step", "break", "continue", "return", "style",
     )
 
     /** Befehlswörter: `zoom = 2` ohne `let` bleibt ein (fehlerhafter) Befehl statt still eine Variable anzulegen. */
@@ -140,6 +167,7 @@ object PocketScriptInterpreter {
         "all", "alles", "set", "cut", "caption", "sub", "untertitel", "text", "title", "titel", "emoji", "sticker",
         "filter", "fx", "blur", "zoom", "speed", "crop", "trim", "move", "pan", "save", "open", "new", "undo", "redo",
         "delete", "clear", "export", "font", "rotate", "rot", "spin", "turn", "drehen", "flip", "mirror", "split", "reset",
+        "fade", "flash", "shake", "kenburns", "pulse", "bpm", "mute", "unmute", "volume", "audio",
     )
 
     /** Einheitliche Zehntelsekunden-Genauigkeit für alle Skript-Zeitvariablen (wie UI & Timecodes). */
@@ -151,10 +179,13 @@ object PocketScriptInterpreter {
         "dauer" to { e -> tenthsSec(e.project.sourceDurationMs) },
         "trimstart" to { e -> tenthsSec(e.project.trimStartMs) },
         "trimend" to { e -> tenthsSec(e.project.trimEndMs) },
+        "end" to { e -> tenthsSec(e.project.trimEndMs) },
         "length" to { e -> tenthsSec(e.project.playableDurationMs) },
         "playhead" to { e -> tenthsSec(e.playheadMs) },
         "zoom" to { e -> e.project.transform.zoom.toDouble() },
         "speed" to { e -> e.project.playbackSpeed.toDouble() },
+        "bpm" to { e -> (e.project.bpm ?: 120f).toDouble() },
+        "volume" to { e -> (e.project.audioVolume * 100f).toDouble() },
         "captions" to { e -> e.project.subtitles.size.toDouble() },
         "texts" to { e -> e.project.overlays.count { it.kind == OverlayKind.TEXT }.toDouble() },
         "emojis" to { e -> e.project.overlays.count { it.kind == OverlayKind.EMOJI }.toDouble() },
@@ -166,40 +197,149 @@ object PocketScriptInterpreter {
 
     // ---------------------------------------------------------------- Einstieg
 
-    /** Schutz vor Endlos-Rekursion: Zeile, die bereits fertig eingesetzt an die Befehle weitergereicht wird. */
-    private var passthroughLine: String? = null
+    /** Thread-safe guard against recursive re-entry when forwarding resolved commands. */
+    private val passthroughLine = ThreadLocal<String?>()
+
+    /**
+     * Strips `#` and `//` comments outside quotes while preserving hex colors (`.#FF5733`),
+     * hashtags (`#1`), and URIs (`content://`, `file://`), then splits statements on top-level `;`.
+     */
+    private fun splitScriptLines(input: String): List<SourceLine> {
+        val out = mutableListOf<SourceLine>()
+        val physicalLines = input.split(Regex("\r\n|\n|\r"))
+        for ((idx, rawLine) in physicalLines.withIndex()) {
+            val lineNum = idx + 1
+            val stripped = stripInlineComment(rawLine).trim()
+            if (stripped.isEmpty()) continue
+            for (part in splitTopLevelSemicolons(stripped)) {
+                val cleaned = part.trim().replace(Regex("""^\d+\.\s+(?=[a-zA-Z($#])"""), "")
+                if (cleaned.isNotEmpty()) out.add(SourceLine(lineNum, cleaned))
+            }
+        }
+        return out
+    }
+
+    private fun stripInlineComment(line: String): String {
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("#") || trimmed.startsWith("//")) return ""
+        var quote: Char? = null
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            when {
+                quote != null -> {
+                    if (c == '\\' && i + 1 < line.length) {
+                        i += 2
+                        continue
+                    }
+                    if (c == quote) quote = null
+                }
+                c == '"' || c == '\'' -> quote = c
+                c == '/' && i + 1 < line.length && line[i + 1] == '/' && (i == 0 || line[i - 1].isWhitespace()) ->
+                    return line.substring(0, i)
+                c == '#' && i > 0 && line[i - 1].isWhitespace() &&
+                    (i + 1 == line.length || line[i + 1].isWhitespace() || line[i + 1] == '#') ->
+                    return line.substring(0, i)
+            }
+            i++
+        }
+        return line
+    }
+
+    private fun splitTopLevelSemicolons(line: String): List<String> {
+        val parts = mutableListOf<String>()
+        val cur = StringBuilder()
+        var quote: Char? = null
+        var depth = 0
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            when {
+                quote != null -> {
+                    cur.append(c)
+                    if (c == '\\' && i + 1 < line.length) {
+                        cur.append(line[i + 1])
+                        i += 2
+                        continue
+                    }
+                    if (c == quote) quote = null
+                }
+                c == '"' || c == '\'' -> {
+                    quote = c
+                    cur.append(c)
+                }
+                c == '(' || c == '[' || c == '{' -> {
+                    depth++
+                    cur.append(c)
+                }
+                c == ')' || c == ']' || c == '}' -> {
+                    depth = (depth - 1).coerceAtLeast(0)
+                    cur.append(c)
+                }
+                c == ';' && depth == 0 -> {
+                    parts.add(cur.toString())
+                    cur.clear()
+                }
+                else -> cur.append(c)
+            }
+            i++
+        }
+        if (cur.isNotEmpty()) parts.add(cur.toString())
+        return parts
+    }
 
     /**
      * Führt [input] aus, falls es ein Programm ist (mehrere Zeilen oder ein Programmier-Konstrukt).
      * Gibt `null` zurück, wenn es ein gewöhnlicher Einzelbefehl ist, den der Aufrufer selbst behandelt.
      */
     fun tryRun(input: String, engine: ProjectEngine): String? {
-        if (input == passthroughLine) return null
-        val hasSeparators = input.contains("\n") || input.contains(";")
-        val lines = input.split(Regex("[\r\n;]+"))
-            .map { it.trim().replace(Regex("""^\d+\.\s+"""), "") }
-            .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
-        if (lines.isEmpty()) return if (hasSeparators) "Keine ausführbaren Zeilen." else null
+        if (input == passthroughLine.get()) return null
+        val trimmedInput = input.trim()
+        val hasSeparators = input.contains("\n") || input.contains(";") ||
+            trimmedInput.startsWith("#") || trimmedInput.startsWith("//")
+        val lines = splitScriptLines(input)
+        if (lines.isEmpty()) {
+            return if (hasSeparators) {
+                engine.lastScriptOutput = listOf(ScriptOutputLine("Keine ausführbaren Zeilen.", isError = false))
+                "Keine ausführbaren Zeilen."
+            } else {
+                null
+            }
+        }
 
         val run = Run(engine)
         val program = try {
             parseBlock(LineReader(lines), topLevel = true, run)
         } catch (e: ScriptError) {
-            return "⚠ ${e.message}"
+            val msg = "⚠ ${e.message}"
+            engine.lastScriptOutput = listOf(ScriptOutputLine(msg, isError = true))
+            return msg
         }
 
         val plainOnly = program.all { it is Stmt.Command && !run.needsInterpolation(it.text) }
-        if (plainOnly && program.size == 1) return null
+        // If inline comments or numbered prefixes were stripped from a single line, run the cleaned text
+        if (plainOnly && program.size == 1 && lines.first().text == trimmedInput) return null
         if (plainOnly) {
+            if (program.size == 1) {
+                val cleanedLine = lines.first().text
+                val res = forwardCommand(cleanedLine, engine)
+                val err = engine.commandHistory.lastOrNull()?.isError == true || res.startsWith("⚠")
+                engine.lastScriptOutput = listOf(ScriptOutputLine(res, isError = err))
+                return res
+            }
             // Reine Befehlslisten wie bisher: erst die Setup-Zeilen, danach die `if`/`while`-Regeln,
             // damit eine Regel auch dann greift, wenn sie vor dem passenden `set caption:` steht.
-            val (rules, setup) = lines.partition { PocketScriptParser.isLegacyRuleLine(it) }
+            val (rules, setup) = lines.map { it.text }.partition { PocketScriptParser.isLegacyRuleLine(it) }
             var anyError = false
+            val outLines = mutableListOf<ScriptOutputLine>()
             val results = (setup + rules).map { line ->
-                val res = engine.executeCommand(line)
-                if (engine.commandHistory.lastOrNull()?.isError == true) anyError = true
+                val res = forwardCommand(line, engine)
+                val err = engine.commandHistory.lastOrNull()?.isError == true || res.startsWith("⚠")
+                if (err) anyError = true
+                outLines.add(ScriptOutputLine(res, isError = err))
                 res
             }
+            engine.lastScriptOutput = outLines
             val prefix = if (anyError) "⚠ " else ""
             return "$prefix${lines.size} Zeilen ausgeführt: " + results.joinToString(" · ")
         }
@@ -207,14 +347,39 @@ object PocketScriptInterpreter {
         try {
             run.execute(program)
         } catch (e: ScriptError) {
-            return run.failure(e)
+            val msg = run.failure(e)
+            engine.lastScriptOutput = run.outputLines + ScriptOutputLine(msg, isError = true)
+            return msg
+        } catch (b: BreakSignal) {
+            val msg = run.failure(ScriptError("Zeile ${b.line}: 'break' nur innerhalb einer Schleife erlaubt."))
+            engine.lastScriptOutput = run.outputLines + ScriptOutputLine(msg, isError = true)
+            return msg
+        } catch (c: ContinueSignal) {
+            val msg = run.failure(ScriptError("Zeile ${c.line}: 'continue' nur innerhalb einer Schleife erlaubt."))
+            engine.lastScriptOutput = run.outputLines + ScriptOutputLine(msg, isError = true)
+            return msg
+        } catch (_: ReturnSignal) {
+            val msg = run.failure(ScriptError("'return' nur innerhalb einer Funktion (def) erlaubt."))
+            engine.lastScriptOutput = run.outputLines + ScriptOutputLine(msg, isError = true)
+            return msg
         }
+        engine.lastScriptOutput = run.outputLines
         return run.summary()
+    }
+
+    private fun forwardCommand(cleanedLine: String, engine: ProjectEngine): String {
+        val previous = passthroughLine.get()
+        passthroughLine.set(cleanedLine)
+        return try {
+            engine.executeCommand(cleanedLine)
+        } finally {
+            passthroughLine.set(previous)
+        }
     }
 
     /** Liest eine gespeicherte Funktions-Definition wieder ein (`null`, falls sie nicht mehr lesbar ist). */
     fun parseFunction(source: String, engine: ProjectEngine): ScriptFunction? = try {
-        val lines = source.split(Regex("[\r\n;]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        val lines = splitScriptLines(source)
         (parseBlock(LineReader(lines), topLevel = true, Run(engine)).firstOrNull() as? Stmt.Def)?.function
     } catch (_: ScriptError) {
         null
@@ -222,13 +387,12 @@ object PocketScriptInterpreter {
 
     // ---------------------------------------------------------------- Parser (Zeilen -> Anweisungen)
 
-    private class LineReader(private val lines: List<String>) {
+    private class LineReader(private val lines: List<SourceLine>) {
         var index = 0
-        fun slice(from: Int, to: Int) = lines.subList(from, to)
+        fun sliceText(from: Int, to: Int) = lines.subList(from, to).map { it.text }
         fun hasNext() = index < lines.size
-        fun peek() = lines[index]
-        fun next() = lines[index++]
-        val lineNumber get() = index
+        fun peek(): SourceLine = lines[index]
+        fun next(): SourceLine = lines[index++]
     }
 
     /** Position des ersten `:` außerhalb von Klammern und Anführungszeichen (trennt Kopf und Einzeiler-Rumpf). */
@@ -237,8 +401,8 @@ object PocketScriptInterpreter {
         var quote: Char? = null
         for ((i, c) in text.withIndex()) {
             when {
-                quote != null -> if (c == quote) quote = null
-                c == '"' -> quote = c
+                quote != null -> if (c == quote && (i == 0 || text[i - 1] != '\\')) quote = null
+                c == '"' || c == '\'' -> quote = c
                 c == '(' || c == '[' || c == '{' -> depth++
                 c == ')' || c == ']' || c == '}' -> depth--
                 c == ':' && depth <= 0 -> {
@@ -261,11 +425,12 @@ object PocketScriptInterpreter {
     private fun parseBlock(reader: LineReader, topLevel: Boolean, run: Run): List<Stmt> {
         val out = mutableListOf<Stmt>()
         while (reader.hasNext()) {
-            val lower = reader.peek().lowercase()
+            val nextLine = reader.peek()
+            val lower = nextLine.text.lowercase()
             if (lower in endWords || lower in elseWords || lower.startsWith("elif ") ||
                 lower.startsWith("else if ") || lower.startsWith("sonst wenn ")
             ) {
-                if (topLevel) throw ScriptError("Zeile ${reader.lineNumber + 1}: '${reader.peek()}' ohne passenden Block-Anfang.")
+                if (topLevel) throw ScriptError("Zeile ${nextLine.lineNumber}: '${nextLine.text}' ohne passenden Block-Anfang.")
                 return out
             }
             out.add(parseStatement(reader, run))
@@ -275,26 +440,39 @@ object PocketScriptInterpreter {
     }
 
     private fun body(reader: LineReader, inline: String, run: Run, startLine: Int): List<Stmt> {
-        if (inline.isNotEmpty()) return listOf(parseStatement(LineReader(listOf(inline)), run, startLine))
-        val block = parseBlock(reader, topLevel = false, run)
-        return block
+        if (inline.isNotEmpty()) return listOf(parseStatement(LineReader(listOf(SourceLine(startLine, inline))), run, startLine))
+        return parseBlock(reader, topLevel = false, run)
     }
 
     private fun expectEnd(reader: LineReader, what: String, startLine: Int) {
-        if (!reader.hasNext() || reader.next().lowercase() !in endWords) {
+        if (!reader.hasNext() || reader.next().text.lowercase() !in endWords) {
             throw ScriptError("Zeile $startLine: '$what' wurde nicht mit 'end' abgeschlossen.")
         }
     }
 
     private fun parseStatement(reader: LineReader, run: Run, fixedLine: Int? = null): Stmt {
-        val text = reader.next()
-        val line = fixedLine ?: reader.lineNumber
+        val entry = reader.next()
+        val text = entry.text
+        val line = fixedLine ?: entry.lineNumber
+
+        if (text.equals("break", ignoreCase = true) || text.equals("abbrechen", ignoreCase = true)) return Stmt.Break(line)
+        if (text.equals("continue", ignoreCase = true) || text.equals("weiter", ignoreCase = true)) return Stmt.Continue(line)
+        returnRegex.matchEntire(text)?.let { return Stmt.Return(line, it.groupValues[1].trim()) }
 
         if (text.equals("vars", ignoreCase = true) || text.equals("variablen", ignoreCase = true)) return Stmt.Vars(line)
         if (clearVarsRegex.matches(text)) return Stmt.Vars(line, clear = true)
         if (clearGlobalsRegex.matches(text)) return Stmt.Vars(line, clear = true, globals = true)
         unsetRegex.matchEntire(text)?.let { return Stmt.Unset(line, it.groupValues[2], global = it.groupValues[1].isNotEmpty()) }
         printRegex.matchEntire(text)?.let { return Stmt.Print(line, it.groupValues[1]) }
+
+        styleRegex.matchEntire(text)?.let { m ->
+            val global = m.groupValues[1].isNotEmpty()
+            val name = m.groupValues[2]
+            val rawValue = m.groupValues[3].trim()
+            checkName(name, line)
+            val normalized = if (rawValue.startsWith(".")) rawValue else ".$rawValue"
+            return Stmt.Style(line, name, normalized, global)
+        }
 
         defRegex.matchEntire(text)?.let { m ->
             val firstLine = reader.index - 1
@@ -312,7 +490,7 @@ object PocketScriptInterpreter {
                 body(reader, inline, run, line).also { if (inline.isEmpty()) expectEnd(reader, "def $name", line) }
             }
             // Alle Zeilen der Definition (bei Blöcken bis `end`) als Text merken – ohne das `global` davor
-            val source = reader.slice(firstLine, reader.index).joinToString("\n")
+            val source = reader.sliceText(firstLine, reader.index).joinToString("\n")
                 .replaceFirst(Regex("""^global\s+""", RegexOption.IGNORE_CASE), "")
             run.declaredFunctions.add(name.lowercase())
             return Stmt.Def(line, ScriptFunction(name, params, stmts, formula, source), global)
@@ -346,7 +524,8 @@ object PocketScriptInterpreter {
             var elseBody: List<Stmt>? = null
             while (true) {
                 if (!reader.hasNext()) throw ScriptError("Zeile $line: 'if' wurde nicht mit 'end' abgeschlossen.")
-                val next = reader.next()
+                val nextEntry = reader.next()
+                val next = nextEntry.text
                 val nextLower = next.lowercase()
                 when {
                     nextLower in endWords -> break
@@ -356,9 +535,9 @@ object PocketScriptInterpreter {
                         break
                     }
                     else -> {
-                        val em = ifRegex.matchEntire(next) ?: throw ScriptError("Zeile $line: Unerwartetes '$next'.")
+                        val em = ifRegex.matchEntire(next) ?: throw ScriptError("Zeile ${nextEntry.lineNumber}: Unerwartetes '$next'.")
                         val elifCondition = em.groupValues[2].trim().removeSuffix(":").trim()
-                        branches.add(Branch(keyword, elifCondition, parseBlock(reader, topLevel = false, run)))
+                        branches.add(Branch(em.groupValues[1].lowercase(), elifCondition, parseBlock(reader, topLevel = false, run)))
                     }
                 }
             }
@@ -407,19 +586,26 @@ object PocketScriptInterpreter {
     private class Run(val engine: ProjectEngine) : ScriptExpression.Scope {
         val env = engine.scriptEnv
         val messages = mutableListOf<String>()
+        val outputLines = mutableListOf<ScriptOutputLine>()
         val declaredFunctions = mutableSetOf<String>()
         private val locals = ArrayDeque<MutableMap<String, Any>>()
         private var steps = 0
         private var executedCommands = 0
         private var hasErrors = false
 
+        override fun bpm(): Float? = engine.project.bpm
+        override fun durationSec(): Double = tenthsSec(engine.project.sourceDurationMs)
+
         // --- Variablen
 
         override fun variable(name: String): Any? {
             val key = name.lowercase()
             for (i in locals.indices.reversed()) locals[i][key]?.let { return it }
-            // Reihenfolge: Funktions-Parameter, Projekt-Variable, globale Variable, eingebauter Wert
-            return env.variables[key] ?: env.globals[key] ?: builtinVariables[key]?.invoke(engine)
+            // Order: function params/locals -> project var -> global var -> builtin -> named style
+            return env.variables[key]
+                ?: env.globals[key]
+                ?: builtinVariables[key]?.invoke(engine)
+                ?: env.style(key)
         }
 
         /** Legt eine Variable an oder ändert sie; gibt zurück, ob dabei eine globale Variable geschrieben wurde. */
@@ -434,8 +620,9 @@ object PocketScriptInterpreter {
                     env.globals[key] = value
                     engine.persistGlobals()
                 }
-                // In einer Funktion: bestehende Projekt-Variable ändern, sonst lokal anlegen
-                frame != null && (frame.containsKey(key) || !env.variables.containsKey(key)) -> frame[key] = value
+                // Inside a function: explicit `let`/`var`/`sei` always writes to local frame (never clobbers project vars)
+                frame != null && (declared || frame.containsKey(key) || !env.variables.containsKey(key)) ->
+                    frame[key] = value
                 else -> env.variables[key] = value
             }
             return updatesGlobal
@@ -444,8 +631,18 @@ object PocketScriptInterpreter {
         override fun callFunction(name: String, args: List<Any>): Any? {
             val fn = env.function(name) ?: return null
             val formula = fn.formula
-                ?: throw ScriptError("'${fn.name}' ist ein Befehls-Block und liefert keinen Wert (nutze def ${fn.name}(…) = Formel).")
-            return withFrame(fn, args) { ScriptExpression.evaluate(formula, this) }
+            if (formula != null) {
+                return withFrame(fn, args) { ScriptExpression.evaluate(formula, this) }
+            }
+            return withFrame(fn, args) {
+                val returned = try {
+                    execute(fn.body)
+                    null
+                } catch (r: ReturnSignal) {
+                    r.value
+                }
+                returned ?: throw ScriptError("'${fn.name}' hat keinen Wert mit 'return' zurückgegeben.")
+            }
         }
 
         private fun <T> withFrame(fn: ScriptFunction, args: List<Any>, block: () -> T): T {
@@ -480,7 +677,7 @@ object PocketScriptInterpreter {
             }
         }
 
-        /** Wert rechts von `=`: Rechnung/Vergleich, sonst der (eingesetzte) Text selbst. */
+        /** Wert rechts von `=`: Rechnung/Vergleich/Liste, sonst der (eingesetzte) Text selbst. */
         private fun valueOf(text: String): Any {
             ScriptExpression.evaluateOrNull(text, this)?.let { return it }
             val plain = interpolate(text).trim()
@@ -504,6 +701,11 @@ object PocketScriptInterpreter {
             if (++steps > MAX_STEPS) throw ScriptError("Zeile $line: Abbruch nach $MAX_STEPS Schritten (Endlosschleife?).")
         }
 
+        private fun addInfo(msg: String) {
+            messages.add(msg)
+            outputLines.add(ScriptOutputLine(msg, isError = msg.startsWith("⚠")))
+        }
+
         private fun command(text: String) {
             val resolved = interpolate(text).trim()
             // Aufruf einer Funktion, die erst weiter unten im Skript definiert wurde
@@ -513,17 +715,11 @@ object PocketScriptInterpreter {
                     return
                 }
             }
-            val previous = passthroughLine
-            passthroughLine = resolved
-            try {
-                val res = engine.executeCommand(resolved)
-                if (engine.commandHistory.lastOrNull()?.isError == true || res.startsWith("⚠")) {
-                    hasErrors = true
-                }
-                messages.add(res)
-            } finally {
-                passthroughLine = previous
-            }
+            val res = forwardCommand(resolved, engine)
+            val err = engine.commandHistory.lastOrNull()?.isError == true || res.startsWith("⚠")
+            if (err) hasErrors = true
+            messages.add(res)
+            outputLines.add(ScriptOutputLine(res, isError = err))
             executedCommands++
         }
 
@@ -536,8 +732,8 @@ object PocketScriptInterpreter {
             return ScriptExpression.truthy(value)
         }
 
-        /** Block unter einer klassischen Bedingung (`if caption red` … `end`): jede Zeile wird zur Regel. */
-        private fun executeLegacyGuarded(keyword: String, condition: String, body: List<Stmt>) {
+        /** Executes statements inside a matched timed legacy `if`/`while` block (scoping commands to [windows]). */
+        private fun executeScopedBlock(keyword: String, condition: String, body: List<Stmt>) {
             for (stmt in body) {
                 if (stmt is Stmt.Command) command("$keyword $condition: ${stmt.text}") else executeOne(stmt)
             }
@@ -548,6 +744,27 @@ object PocketScriptInterpreter {
             when (stmt) {
                 is Stmt.Command -> command(stmt.text)
 
+                is Stmt.Break -> throw BreakSignal(stmt.line)
+                is Stmt.Continue -> throw ContinueSignal(stmt.line)
+                is Stmt.Return -> {
+                    val value = if (stmt.valueText.isEmpty()) null else valueOf(stmt.valueText)
+                    throw ReturnSignal(value)
+                }
+
+                is Stmt.Style -> {
+                    val key = stmt.name.lowercase()
+                    if (stmt.global) {
+                        env.globalStyles[key] = stmt.value
+                        engine.persistGlobals()
+                    } else {
+                        env.styles[key] = stmt.value
+                    }
+                    addInfo(
+                        "Style ${stmt.name} = ${stmt.value}" +
+                            if (stmt.global) " (global – gilt in allen Projekten)" else "",
+                    )
+                }
+
                 is Stmt.Assign -> {
                     val value = valueOf(stmt.valueText)
                     val result = if (stmt.op.isEmpty()) {
@@ -557,6 +774,8 @@ object PocketScriptInterpreter {
                             ?: throw ScriptError("Zeile ${stmt.line}: Variable '${stmt.name}' gibt es noch nicht.")
                         if (stmt.op == "+" && (current is String || value is String)) {
                             ScriptExpression.format(current) + ScriptExpression.format(value)
+                        } else if (stmt.op == "+" && current is List<*>) {
+                            if (value is List<*>) current + value else current + listOf(value)
                         } else {
                             val a = ScriptExpression.toNumber(current, "${stmt.name} ${stmt.op}=")
                             val b = ScriptExpression.toNumber(value, "${stmt.name} ${stmt.op}=")
@@ -569,34 +788,72 @@ object PocketScriptInterpreter {
                         }
                     }
                     val wroteGlobal = assign(stmt.name, result, stmt.declared, stmt.global)
-                    messages.add("${stmt.name} = ${ScriptExpression.format(result)}" + if (wroteGlobal) " (global – gilt in allen Projekten)" else "")
+                    if (locals.isEmpty()) {
+                        addInfo("${stmt.name} = ${ScriptExpression.format(result)}" + if (wroteGlobal) " (global – gilt in allen Projekten)" else "")
+                    }
                 }
 
                 is Stmt.Print -> {
                     val value = ScriptExpression.evaluateOrNull(stmt.text, this)
-                    messages.add(if (value != null) ScriptExpression.format(value) else interpolate(stmt.text))
+                    addInfo(if (value != null) ScriptExpression.format(value) else interpolate(stmt.text))
                 }
 
                 is Stmt.If -> {
-                    val first = stmt.branches.first()
-                    if (PocketScriptParser.isLegacyCondition(interpolate(first.condition))) {
-                        executeLegacyGuarded(first.keyword, interpolate(first.condition), first.body)
-                    } else {
-                        val hit = stmt.branches.firstOrNull { condition(it.condition, stmt.line) }
-                        execute(hit?.body ?: stmt.elseBody ?: emptyList())
+                    var matched = false
+                    var lastWarning: String? = null
+                    for (branch in stmt.branches) {
+                        val resolvedCond = interpolate(branch.condition)
+                        if (PocketScriptParser.isLegacyCondition(resolvedCond)) {
+                            when (val res = PocketScriptParser.evaluateLegacyCondition(resolvedCond, engine)) {
+                                is PocketScriptParser.LegacyConditionMatch.Timed -> {
+                                    executeScopedBlock(branch.keyword, resolvedCond, branch.body)
+                                    matched = true
+                                    break
+                                }
+                                is PocketScriptParser.LegacyConditionMatch.General -> {
+                                    if (res.matched) {
+                                        execute(branch.body)
+                                        matched = true
+                                        break
+                                    }
+                                }
+                                is PocketScriptParser.LegacyConditionMatch.NoMatch -> {
+                                    lastWarning = res.message
+                                }
+                            }
+                        } else if (condition(branch.condition, stmt.line)) {
+                            execute(branch.body)
+                            matched = true
+                            break
+                        }
+                    }
+                    if (!matched) {
+                        if (stmt.elseBody != null) {
+                            execute(stmt.elseBody)
+                        } else if (lastWarning != null) {
+                            hasErrors = true
+                            addInfo("⚠ $lastWarning")
+                        }
                     }
                 }
 
                 is Stmt.While -> {
-                    if (PocketScriptParser.isLegacyCondition(interpolate(stmt.condition))) {
-                        executeLegacyGuarded(stmt.keyword, interpolate(stmt.condition), stmt.body)
+                    val resolvedCond = interpolate(stmt.condition)
+                    if (PocketScriptParser.isLegacyCondition(resolvedCond)) {
+                        executeScopedBlock(stmt.keyword, resolvedCond, stmt.body)
                     } else {
                         var iterations = 0
                         while (condition(stmt.condition, stmt.line)) {
                             if (++iterations > MAX_LOOP_ITERATIONS) {
                                 throw ScriptError("Zeile ${stmt.line}: while-Schleife nach $MAX_LOOP_ITERATIONS Durchläufen abgebrochen (Bedingung wird nie falsch).")
                             }
-                            execute(stmt.body)
+                            try {
+                                execute(stmt.body)
+                            } catch (_: ContinueSignal) {
+                                continue
+                            } catch (_: BreakSignal) {
+                                break
+                            }
                         }
                     }
                 }
@@ -604,7 +861,15 @@ object PocketScriptInterpreter {
                 is Stmt.Repeat -> {
                     val n = number(stmt.count, "repeat", stmt.line).toInt()
                     if (n > MAX_LOOP_ITERATIONS) throw ScriptError("Zeile ${stmt.line}: repeat höchstens $MAX_LOOP_ITERATIONS mal.")
-                    repeat(n.coerceAtLeast(0)) { execute(stmt.body) }
+                    for (i in 0 until n.coerceAtLeast(0)) {
+                        try {
+                            execute(stmt.body)
+                        } catch (_: ContinueSignal) {
+                            continue
+                        } catch (_: BreakSignal) {
+                            break
+                        }
+                    }
                 }
 
                 is Stmt.For -> executeFor(stmt)
@@ -617,7 +882,7 @@ object PocketScriptInterpreter {
                     } else {
                         env.functions[key] = stmt.function
                     }
-                    messages.add(
+                    addInfo(
                         "Funktion ${stmt.function.name}(${stmt.function.params.joinToString(", ")}) definiert" +
                             if (stmt.global) " (global – gilt in allen Projekten)" else "",
                     )
@@ -629,20 +894,27 @@ object PocketScriptInterpreter {
                     val args = splitArguments(stmt.args).map { valueOf(it) }
                     val formula = fn.formula
                     if (formula != null) {
-                        messages.add(ScriptExpression.format(withFrame(fn, args) { ScriptExpression.evaluate(formula, this) }))
+                        addInfo(ScriptExpression.format(withFrame(fn, args) { ScriptExpression.evaluate(formula, this) }))
                     } else {
-                        withFrame(fn, args) { execute(fn.body) }
+                        withFrame(fn, args) {
+                            try {
+                                execute(fn.body)
+                            } catch (r: ReturnSignal) {
+                                if (r.value != null) addInfo(ScriptExpression.format(r.value))
+                            }
+                        }
                     }
                 }
 
                 is Stmt.Vars -> if (stmt.clear && stmt.globals) {
                     env.globals.clear()
                     env.globalFunctions.clear()
+                    env.globalStyles.clear()
                     engine.persistGlobals()
-                    messages.add("Alle globalen Variablen und Funktionen gelöscht.")
+                    addInfo("Alle globalen Variablen, Styles und Funktionen gelöscht.")
                 } else if (stmt.clear) {
                     env.clear()
-                    messages.add("Alle Variablen und Funktionen dieses Projekts gelöscht (globale bleiben: clear globals).")
+                    addInfo("Alle Variablen, Styles und Funktionen dieses Projekts gelöscht (globale bleiben: clear globals).")
                 } else {
                     val vars = env.variables.map { (k, v) -> "$k = ${ScriptExpression.format(v)}" }
                     val globals = env.globals.map { (k, v) ->
@@ -650,11 +922,13 @@ object PocketScriptInterpreter {
                     }
                     val fns = env.functions.values.map { "def ${it.name}(${it.params.joinToString(", ")})" } +
                         env.globalFunctions.values.map { "global def ${it.name}(${it.params.joinToString(", ")})" }
-                    messages.add(
+                    val stys = env.styles.map { (k, v) -> "style $k = $v" } +
+                        env.globalStyles.map { (k, v) -> "global style $k = $v" }
+                    addInfo(
                         when {
-                            vars.isEmpty() && globals.isEmpty() && fns.isEmpty() ->
+                            vars.isEmpty() && globals.isEmpty() && fns.isEmpty() && stys.isEmpty() ->
                                 "Noch keine Variablen. Beispiel: let x = 5 (dieses Projekt) oder global x = 5 (alle Projekte) · Eingebaut: ${builtinVariables.keys.joinToString(", ") { "$$it" }}"
-                            else -> (vars + globals + fns).joinToString(" · ")
+                            else -> (vars + globals + fns + stys).joinToString(" · ")
                         },
                     )
                 }
@@ -662,7 +936,8 @@ object PocketScriptInterpreter {
                 is Stmt.Unset -> {
                     val key = stmt.name.lowercase()
                     val removed = when {
-                        !stmt.global && (env.variables.remove(key) != null || env.functions.remove(key) != null) -> "'${stmt.name}' gelöscht."
+                        !stmt.global && (env.variables.remove(key) != null || env.functions.remove(key) != null || env.styles.remove(key) != null) ->
+                            "'${stmt.name}' gelöscht."
                         env.globals.remove(key) != null -> {
                             engine.persistGlobals()
                             "Globale Variable '${stmt.name}' gelöscht."
@@ -671,9 +946,13 @@ object PocketScriptInterpreter {
                             engine.persistGlobals()
                             "Globale Funktion '${stmt.name}' gelöscht."
                         }
+                        env.globalStyles.remove(key) != null -> {
+                            engine.persistGlobals()
+                            "Globaler Style '${stmt.name}' gelöscht."
+                        }
                         else -> null
                     }
-                    messages.add(removed ?: "'${stmt.name}' gibt es nicht.")
+                    addInfo(removed ?: "'${stmt.name}' gibt es nicht.")
                 }
             }
         }
@@ -681,7 +960,15 @@ object PocketScriptInterpreter {
         private fun executeFor(stmt: Stmt.For) {
             val source = stmt.source.trim()
             val rangeMatch = Regex("""^(.+?)\.\.(.+?)(?:\s+(?:step|schritt)\s+(.+))?$""", RegexOption.IGNORE_CASE).matchEntire(source)
+            val beatsSugarMatch = Regex("""^beats\s*\((.+)\)$""", RegexOption.IGNORE_CASE).matchEntire(source)
             val items: List<Map<String, Any>> = when {
+                beatsSugarMatch != null -> {
+                    // Supports `for b in beats(0..16)` as well as `beats(0, 16, 120)`
+                    val inner = beatsSugarMatch.groupValues[1].replace("..", ", ")
+                    val res = ScriptExpression.evaluate("beats($inner)", this) as? List<*>
+                        ?: throw ScriptError("Zeile ${stmt.line}: beats(...) lieferte keine Liste.")
+                    res.filterNotNull().map { mapOf(stmt.variable to it) }
+                }
                 rangeMatch != null -> {
                     val from = number(rangeMatch.groupValues[1], "for-Start", stmt.line)
                     val to = number(rangeMatch.groupValues[2], "for-Ende", stmt.line)
@@ -718,16 +1005,43 @@ object PocketScriptInterpreter {
                         element(stmt.variable, i, c.timeMs, c.timeMs, c.id)
                     }
                 else -> {
-                    // Liste: `for farbe in [rot, blau, gelb]` oder `for farbe in rot, blau, gelb`
-                    // … oder eine gemerkte Liste: `let favoriten = [🚀, ⭐]` und dann `for e in $favoriten`
-                    val list = splitArguments(interpolate(source).trim().removeSurrounding("[", "]"))
-                    if (list.isEmpty()) throw ScriptError("Zeile ${stmt.line}: Worüber soll 'for ${stmt.variable} in $source' laufen? (z.B. 1..5, captions, [a, b])")
-                    list.map { mapOf(stmt.variable to valueOf(it)) }
+                    val evalList = ScriptExpression.evaluateOrNull(source, this) as? List<*>
+                    if (evalList != null) {
+                        evalList.filterNotNull().map { mapOf(stmt.variable to it) }
+                    } else {
+                        // Liste: `for farbe in [rot, blau, gelb]` oder `for farbe in rot, blau, gelb`
+                        // … oder eine gemerkte Liste: `let favoriten = [🚀, ⭐]` und dann `for e in $favoriten`
+                        val list = splitArguments(interpolate(source).trim().removeSurrounding("[", "]"))
+                        if (list.isEmpty()) throw ScriptError("Zeile ${stmt.line}: Worüber soll 'for ${stmt.variable} in $source' laufen? (z.B. 1..5, captions, [a, b])")
+                        list.map { mapOf(stmt.variable to valueOf(it)) }
+                    }
                 }
             }
-            for (item in items) {
-                item.forEach { (k, v) -> assign(k, v) }
-                execute(stmt.body)
+
+            // Snapshot loop variable slots so they never leak into project variables after the loop ends
+            val targetMap = locals.lastOrNull() ?: env.variables
+            val loopKeys = listOf(
+                stmt.variable.lowercase(),
+                "${stmt.variable.lowercase()}_start",
+                "${stmt.variable.lowercase()}_end",
+                "${stmt.variable.lowercase()}_text",
+            )
+            val savedSlots = loopKeys.associateWith { targetMap[it] }
+            try {
+                for (item in items) {
+                    item.forEach { (k, v) -> targetMap[k.lowercase()] = v }
+                    try {
+                        execute(stmt.body)
+                    } catch (_: ContinueSignal) {
+                        continue
+                    } catch (_: BreakSignal) {
+                        break
+                    }
+                }
+            } finally {
+                for ((k, oldVal) in savedSlots) {
+                    if (oldVal == null) targetMap.remove(k) else targetMap[k] = oldVal
+                }
             }
         }
 

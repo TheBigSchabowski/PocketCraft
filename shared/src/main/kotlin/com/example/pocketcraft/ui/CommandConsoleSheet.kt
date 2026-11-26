@@ -3,6 +3,7 @@ package com.example.pocketcraft.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -71,35 +79,58 @@ fun PocketScriptCodePanel(
         modifier = modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // 1. Kompakte Kopfzeile des Code-Editors (mit Ausführen, PDF-Handbuch, Einfügen, Leeren & Schließen)
+        // 1. Kompakte Kopfzeile des Code-Editors: Titel links, Scroll-Tools mittig, Ausführen + Schließen rechts fixiert
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Text(
+                text = "⚡ POCKETSCRIPT",
+                color = Color(0xFF00E5FF),
+                fontSize = 11.5.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 1,
+                softWrap = false,
+            )
+
             Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text(
-                    text = "⚡ POCKETSCRIPT",
-                    color = Color(0xFF00E5FF),
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.ExtraBold,
-                )
                 Text(
                     text = "($lineCount Z.)",
                     color = Color(0xFF64748B),
                     fontSize = 10.5.sp,
                     fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    softWrap = false,
                 )
-            }
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
+                // Copy AI prompt directly from the editor header
+                Surface(
+                    color = Color(0xFF1E293B),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.clickable {
+                        platform.copyToClipboard(PocketScriptPdfManualGenerator.AI_CUTTING_PROMPT)
+                        engine.statusBanner = "🤖 KI-Schnitt-Prompt in Zwischenablage kopiert!"
+                    },
+                ) {
+                    Text(
+                        text = "🤖 KI",
+                        color = Color(0xFFA7F3D0),
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
+                    )
+                }
+
                 // PDF-Anleitung öffnen (inkl. 🤖 KI-Prompt Button)
                 Surface(
                     color = Color(0xFF1E293B),
@@ -111,6 +142,8 @@ fun PocketScriptCodePanel(
                         color = Color(0xFFFFD54F),
                         fontSize = 10.5.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
                     )
                 }
@@ -135,6 +168,8 @@ fun PocketScriptCodePanel(
                         color = Color(0xFFA7F3D0),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
                     )
                 }
@@ -151,12 +186,19 @@ fun PocketScriptCodePanel(
                             color = Color(0xFF94A3B8),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            softWrap = false,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
                         )
                     }
                 }
+            }
 
-                // Haupt-Button: Führt alle geschriebenen Zeilen aus
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                // Haupt-Button: Führt alle geschriebenen Zeilen aus (immer vollständig sichtbar)
                 Surface(
                     color = Color(0xFF00E5FF),
                     shape = RoundedCornerShape(8.dp),
@@ -172,6 +214,8 @@ fun PocketScriptCodePanel(
                         color = Color(0xFF04080E),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                     )
                 }
@@ -187,6 +231,8 @@ fun PocketScriptCodePanel(
                         color = Color(0xFFE2E8F0),
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                     )
                 }
@@ -232,12 +278,14 @@ fun PocketScriptCodePanel(
                             lineHeight = 18.sp,
                         )
                     }
+                    val highlighter = remember { PocketScriptSyntaxTransformation() }
                     BasicTextField(
                         value = engine.scriptEditorText,
                         onValueChange = { engine.scriptEditorText = it },
                         singleLine = false,
+                        visualTransformation = highlighter,
                         textStyle = TextStyle(
-                            color = Color(0xFF00E5FF),
+                            color = Color(0xFFE2E8F0),
                             fontSize = 12.5.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.SemiBold,
@@ -251,7 +299,69 @@ fun PocketScriptCodePanel(
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .onPreviewKeyEvent { event ->
+                                // Cmd+Enter / Ctrl+Enter executes the script immediately on desktop
+                                if (event.type == KeyEventType.KeyDown &&
+                                    event.key == Key.Enter &&
+                                    (event.isCtrlPressed || event.isMetaPressed)
+                                ) {
+                                    val script = engine.scriptEditorText.trim()
+                                    if (script.isNotEmpty()) engine.executeCommand(script)
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
                             .semantics { contentDescription = "Befehlseingabe" },
+                    )
+                }
+            }
+        }
+
+        // 3. Live Console Output / Error Strip below the editor
+        val outputLines = engine.lastScriptOutput
+        if (outputLines.isNotEmpty()) {
+            val hasError = outputLines.any { it.isError }
+            Surface(
+                color = if (hasError) Color(0xFF2B1218) else Color(0xFF0A2421),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        1.dp,
+                        if (hasError) Color(0xFFFF5252).copy(alpha = 0.55f) else Color(0xFF10B981).copy(alpha = 0.45f),
+                        RoundedCornerShape(8.dp),
+                    ),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        outputLines.takeLast(3).forEach { line ->
+                            Text(
+                                text = line.text,
+                                color = if (line.isError) Color(0xFFFF8A8A) else Color(0xFFA7F3D0),
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 2,
+                            )
+                        }
+                    }
+                    Text(
+                        text = "✕",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable { engine.lastScriptOutput = emptyList() }
+                            .padding(start = 8.dp),
                     )
                 }
             }
@@ -271,11 +381,13 @@ fun PocketScriptPdfManualDialog(
     val platform = LocalPlatformHooks.current
     var savedPdfPath by remember { mutableStateOf<String?>(null) }
     var lastCopiedCommand by remember { mutableStateOf<String?>(null) }
+    var lastCopiedIsPrompt by remember { mutableStateOf(false) }
 
     fun copyCommandToClipboard(rawCode: String) {
         val cleanCmd = PocketScriptPdfManualGenerator.extractCopyableCommand(rawCode)
         platform.copyToClipboard(cleanCmd)
         lastCopiedCommand = cleanCmd
+        lastCopiedIsPrompt = false
         engine.statusBanner = "In Zwischenablage kopiert: $cleanCmd"
     }
 
@@ -321,6 +433,7 @@ fun PocketScriptPdfManualDialog(
                         modifier = Modifier.clickable {
                             platform.copyToClipboard(PocketScriptPdfManualGenerator.AI_CUTTING_PROMPT)
                             lastCopiedCommand = "🤖 KI-Prompt (Schnitt-Plan)"
+                            lastCopiedIsPrompt = true
                             engine.statusBanner = "🤖 KI-Schnitt-Prompt in Zwischenablage kopiert!"
                         },
                     ) {
@@ -393,26 +506,28 @@ fun PocketScriptPdfManualDialog(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.weight(1f),
                         )
-                        Surface(
-                            color = Color(0xFF00E5FF),
-                            shape = RoundedCornerShape(6.dp),
-                            modifier = Modifier.clickable {
-                                engine.scriptEditorText = if (engine.scriptEditorText.isBlank()) {
-                                    copied
-                                } else {
-                                    engine.scriptEditorText.trimEnd() + "\n" + copied
-                                }
-                                engine.isCommandConsoleOpen = true
-                                onClose()
-                            },
-                        ) {
-                            Text(
-                                text = "Direkt in Editor ▸",
-                                color = Color(0xFF04080E),
-                                fontSize = 10.5.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            )
+                        if (!lastCopiedIsPrompt) {
+                            Surface(
+                                color = Color(0xFF00E5FF),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.clickable {
+                                    engine.scriptEditorText = if (engine.scriptEditorText.isBlank()) {
+                                        copied
+                                    } else {
+                                        engine.scriptEditorText.trimEnd() + "\n" + copied
+                                    }
+                                    engine.isCommandConsoleOpen = true
+                                    onClose()
+                                },
+                            ) {
+                                Text(
+                                    text = "Direkt in Editor ▸",
+                                    color = Color(0xFF04080E),
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
                         }
                     }
                 }
